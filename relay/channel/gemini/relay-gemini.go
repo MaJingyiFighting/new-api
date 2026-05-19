@@ -348,6 +348,10 @@ func CovertOpenAI2Gemini(c *gin.Context, textRequest dto.GeneralOpenAIRequest, i
 					}
 					geminiRequest.GenerationConfig.ImageConfig = imageConfigBytes
 				}
+
+				if cachedContent, ok := googleBody["cachedContent"].(string); ok && cachedContent != "" {
+					geminiRequest.CachedContent = cachedContent
+				}
 			}
 		}
 	}
