@@ -20,6 +20,10 @@ For commercial licensing, please contact support@quantumnous.com
  * Type definitions for usage logs
  */
 import type { UsageLog } from './data/schema'
+import type {
+  GenerationDebugRaw,
+  GenerationDebugSummary,
+} from './components/generation-debug/types'
 
 // ============================================================================
 // Log Category Types
@@ -111,7 +115,9 @@ export interface LogOtherData {
     admin_id?: number | string
     admin_role?: number
     auth_method?: 'session' | 'access_token' | string
+    generation_debug_raw?: GenerationDebugRaw
   }
+  generation_debug?: GenerationDebugSummary
   // Language-independent operation descriptor (audit/login logs).
   // Frontend renders localized content from action + params via i18n templates.
   op?: {

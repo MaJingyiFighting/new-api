@@ -42,6 +42,7 @@ import { Dialog } from '@/components/dialog'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { DynamicPricingBreakdown } from '@/features/pricing/components/dynamic-pricing-breakdown'
 import type { UsageLog } from '../../data/schema'
+import { GenerationDebugSection } from '../generation-debug/generation-debug-section'
 import {
   parseLogOther,
   getParamOverrideActionLabel,
@@ -947,6 +948,8 @@ export function DetailsDialog(props: DetailsDialogProps) {
             />
           </DetailSection>
         )}
+
+        <GenerationDebugSection log={props.log} other={other} isAdmin={props.isAdmin} />
 
         {/* Token breakdown (for consume/error types with token data) */}
         {isDisplayableType(props.log.type) && other && (

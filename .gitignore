@@ -12,6 +12,10 @@ web/default/dist
 web/classic/dist
 web/node_modules
 web/dist
+# Temporary pnpm artifacts (repo uses Bun; these only exist for ad-hoc pnpm verification).
+.pnpm-store/
+web/pnpm-lock.yaml
+web/pnpm-workspace.yaml
 .env
 one-api
 new-api
