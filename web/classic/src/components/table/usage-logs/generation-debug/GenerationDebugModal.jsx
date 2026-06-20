@@ -23,6 +23,7 @@ import PromptDebugPanel from './PromptDebugPanel';
 import RawDebugPanel from './RawDebugPanel';
 import JsonViewer from './JsonViewer';
 import {
+  finishReasonLabel,
   formatCost,
   formatLatency,
   formatThroughput,
@@ -64,7 +65,8 @@ const CompletionPanel = ({ completion, rawResponse, t }) => {
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {completion.finish_reason && (
             <Tag>
-              {t('Finish Reason')}: {completion.finish_reason}
+              {t('Finish Reason')}:{' '}
+              {finishReasonLabel(completion.finish_reason, t)}
             </Tag>
           )}
           {completion.generation_id && (
@@ -191,7 +193,10 @@ const GenerationDebugModal = ({
             />
             <OverviewCard
               label={t('Finish Reason')}
-              value={summary.finish_reason || summary.completion?.finish_reason}
+              value={finishReasonLabel(
+                summary.finish_reason || summary.completion?.finish_reason,
+                t,
+              )}
               mono
             />
             <OverviewCard
@@ -232,6 +237,8 @@ const GenerationDebugModal = ({
           <PromptDebugPanel
             prompt={summary.prompt}
             rawRequest={rawRequest}
+            providerPromptTokens={summary.prompt_tokens}
+            providerCachedTokens={summary.cache?.cached_tokens ?? 0}
             t={t}
           />
 

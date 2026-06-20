@@ -24,9 +24,15 @@ import JsonViewer from './JsonViewer';
 import TokenMessageChart from './TokenMessageChart';
 import {
   cacheStatusColor,
+  cacheStatusLabel,
+  confidenceLabel,
+  derivePromptCacheView,
   formatTokens,
   normalizedPromptUnits,
+  roleLabel,
   roleCountsFromMessages,
+  sourceLabel,
+  unitKindLabel,
 } from './utils';
 
 const MetricLine = ({ label, value, mono }) => (
@@ -46,16 +52,33 @@ const MetricLine = ({ label, value, mono }) => (
   </div>
 );
 
-const CacheBoundaryCard = ({ prompt, t }) => {
+const CacheBoundaryCard = ({
+  prompt,
+  providerPromptTokens,
+  providerCachedTokens,
+  cacheBoundary,
+  t,
+}) => {
   const accounting = prompt?.token_accounting;
-  const boundary = prompt?.cache_boundary;
   const promptTokens =
-    accounting?.prompt_tokens ?? prompt?.total_estimated_tokens ?? 0;
+    providerPromptTokens ??
+    accounting?.prompt_tokens ??
+    prompt?.total_estimated_tokens ??
+    0;
   const cachedTokens =
-    accounting?.cached_tokens ?? boundary?.cached_tokens ?? 0;
-  const hitRate = promptTokens > 0 ? cachedTokens / promptTokens : 0;
-  const breakpoint = boundary?.break_unit_path
-    ? `${boundary.break_unit_path} · ${t('offset')} ${boundary.break_offset_tokens} ${t('tokens')}`
+    providerCachedTokens ??
+    accounting?.cached_tokens ??
+    cacheBoundary?.cached_tokens ??
+    0;
+  const hitRate =
+    cacheBoundary?.cache_hit_rate ??
+    (promptTokens > 0 ? cachedTokens / promptTokens : 0);
+  const providerConfidence =
+    providerPromptTokens !== undefined
+      ? 'exact'
+      : (accounting?.confidence ?? 'estimated');
+  const breakpoint = cacheBoundary?.break_unit_path
+    ? `${cacheBoundary.break_unit_path} · ${t('offset')} ${formatTokens(cacheBoundary.break_offset_tokens)} ${t('estimated tokens')}`
     : t('No prompt field breakpoint');
 
   return (
@@ -69,18 +92,22 @@ const CacheBoundaryCard = ({ prompt, t }) => {
       >
         <MetricLine
           label={t('Provider prompt tokens')}
-          value={`${formatTokens(promptTokens)} ${accounting?.confidence ?? 'estimated'}`}
+          value={`${formatTokens(promptTokens)} ${confidenceLabel(providerConfidence, t)}`}
         />
         <MetricLine
           label={t('Provider cached tokens')}
-          value={`${formatTokens(cachedTokens)} ${accounting?.confidence ?? 'estimated'}`}
+          value={`${formatTokens(cachedTokens)} ${confidenceLabel(providerConfidence, t)}`}
         />
         <MetricLine
           label={t('Cache hit rate')}
-          value={`${hitRate.toLocaleString(undefined, {
-            style: 'percent',
-            maximumFractionDigits: 1,
-          })} ${t('exact-total / inferred-field')}`}
+          value={`${formatTokens(cachedTokens)} / ${formatTokens(promptTokens)} · ${hitRate.toLocaleString(
+            undefined,
+            {
+              style: 'percent',
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            },
+          )} ${t('exact-total / inferred-field')}`}
         />
         <MetricLine label={t('Breakpoint')} value={breakpoint} mono />
       </div>
@@ -89,7 +116,10 @@ const CacheBoundaryCard = ({ prompt, t }) => {
           <Tag color='blue' size='small'>
             {t('Cache write tokens')}:{' '}
             {formatTokens(accounting.cache_write_tokens)} ·{' '}
-            {accounting.cache_write_confidence ?? accounting.confidence}
+            {confidenceLabel(
+              accounting.cache_write_confidence ?? accounting.confidence,
+              t,
+            )}
           </Tag>
         )}
         {cachedTokens === 0 && (
@@ -148,9 +178,9 @@ const UnitList = ({ units, selectedUnit, onSelectUnit, t }) => (
             >
               #{unit.index + 1}
             </Typography.Text>
-            <Tag size='small'>{unit.role || t('Unknown')}</Tag>
+            <Tag size='small'>{roleLabel(unit.role, t)}</Tag>
             <Tag color={cacheStatusColor(unit.cache_status)} size='small'>
-              {unit.cache_status || 'unknown'}
+              {cacheStatusLabel(unit.cache_status, t)}
             </Tag>
           </div>
           <Typography.Text type='tertiary' size='small'>
@@ -208,11 +238,11 @@ const UnitDetail = ({ unit, t }) => {
         }}
       >
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <Tag>{unit.role || t('Unknown')}</Tag>
+          <Tag>{roleLabel(unit.role, t)}</Tag>
           <Tag color={cacheStatusColor(unit.cache_status)}>
-            {unit.cache_status}
+            {cacheStatusLabel(unit.cache_status, t)}
           </Tag>
-          <Tag color='grey'>{unit.confidence}</Tag>
+          <Tag color='grey'>{confidenceLabel(unit.confidence, t)}</Tag>
         </div>
         <Button size='small' theme='borderless' onClick={handleCopyPath}>
           {copied ? t('Copied') : t('Copy path')}
@@ -226,7 +256,7 @@ const UnitDetail = ({ unit, t }) => {
         }}
       >
         <MetricLine label={t('Path')} value={unit.path} mono />
-        <MetricLine label={t('Kind')} value={unit.kind} />
+        <MetricLine label={t('Kind')} value={unitKindLabel(unit.kind, t)} />
         <MetricLine
           label={t('Estimated tokens')}
           value={formatTokens(unit.estimated_tokens)}
@@ -239,7 +269,10 @@ const UnitDetail = ({ unit, t }) => {
           label={t('Cache overlap')}
           value={formatTokens(unit.cache_overlap_tokens)}
         />
-        <MetricLine label={t('Cache source')} value={unit.cache_source} />
+        <MetricLine
+          label={t('Cache source')}
+          value={sourceLabel(unit.cache_source, t)}
+        />
       </div>
       <div
         style={{
@@ -260,10 +293,27 @@ const UnitDetail = ({ unit, t }) => {
   );
 };
 
-const PromptDebugPanel = ({ prompt, rawRequest, t }) => {
+const PromptDebugPanel = ({
+  prompt,
+  rawRequest,
+  providerPromptTokens,
+  providerCachedTokens,
+  t,
+}) => {
   const [selectedUnitIndex, setSelectedUnitIndex] = useState(0);
   const [showRawRequest, setShowRawRequest] = useState(false);
-  const units = useMemo(() => normalizedPromptUnits(prompt), [prompt]);
+  const baseUnits = useMemo(() => normalizedPromptUnits(prompt), [prompt]);
+  const cacheView = useMemo(
+    () =>
+      derivePromptCacheView(
+        baseUnits,
+        providerPromptTokens ?? prompt?.token_accounting?.prompt_tokens ?? 0,
+        providerCachedTokens ?? prompt?.token_accounting?.cached_tokens ?? 0,
+        prompt?.cache_boundary,
+      ),
+    [baseUnits, prompt, providerCachedTokens, providerPromptTokens],
+  );
+  const units = cacheView.units;
   const selectedUnit = units[selectedUnitIndex] ?? units[0];
   const roleCounts = useMemo(() => {
     if (prompt?.role_counts && Object.keys(prompt.role_counts).length > 0) {
@@ -282,7 +332,13 @@ const PromptDebugPanel = ({ prompt, rawRequest, t }) => {
     <div
       style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}
     >
-      <CacheBoundaryCard prompt={prompt} t={t} />
+      <CacheBoundaryCard
+        prompt={prompt}
+        providerPromptTokens={providerPromptTokens}
+        providerCachedTokens={providerCachedTokens}
+        cacheBoundary={cacheView.boundary}
+        t={t}
+      />
       <div
         style={{
           display: 'grid',
@@ -302,14 +358,14 @@ const PromptDebugPanel = ({ prompt, rawRequest, t }) => {
         >
           <TokenMessageChart
             units={units}
-            cacheBoundary={prompt?.cache_boundary}
+            cacheBoundary={cacheView.boundary}
             t={t}
           />
           <Card bodyStyle={{ padding: 12 }} style={{ borderRadius: 8 }}>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {Object.entries(roleCounts).map(([role, count]) => (
                 <Tag key={role} size='small'>
-                  {role} · {count}
+                  {roleLabel(role, t)} · {count}
                 </Tag>
               ))}
             </div>

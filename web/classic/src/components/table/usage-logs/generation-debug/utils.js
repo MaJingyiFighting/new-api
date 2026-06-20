@@ -88,6 +88,71 @@ export function normalizedPromptUnits(prompt) {
   });
 }
 
+export function derivePromptCacheView(
+  units,
+  promptTokens,
+  cachedTokens,
+  existingBoundary,
+) {
+  if (!units?.length || promptTokens <= 0) {
+    return { units: units ?? [], boundary: existingBoundary };
+  }
+  const hitRate = Math.min(1, Math.max(0, cachedTokens / promptTokens));
+  const estimatedTotal = units.reduce(
+    (total, unit) => Math.max(total, unit.cumulative_end || 0),
+    0,
+  );
+  const estimatedCachedTokens = Math.round(hitRate * estimatedTotal);
+  let breakUnit;
+  const resolvedUnits = units.map((unit) => {
+    const overlap = Math.min(
+      Math.max(estimatedCachedTokens - unit.cumulative_start, 0),
+      unit.estimated_tokens,
+    );
+    if (
+      !breakUnit &&
+      unit.estimated_tokens > 0 &&
+      unit.cumulative_end > estimatedCachedTokens
+    ) {
+      breakUnit = unit;
+    }
+    return {
+      ...unit,
+      cache_overlap_tokens: overlap,
+      cache_status:
+        overlap <= 0
+          ? 'miss'
+          : overlap >= unit.estimated_tokens
+            ? 'hit'
+            : 'partial',
+      cache_source: 'cache_boundary_inference',
+      confidence: 'inferred',
+    };
+  });
+  if (!breakUnit) breakUnit = units[units.length - 1];
+  return {
+    units: resolvedUnits,
+    boundary: {
+      ...existingBoundary,
+      cached_tokens: cachedTokens,
+      prompt_tokens: promptTokens,
+      cache_hit_rate: hitRate,
+      estimated_cached_tokens: estimatedCachedTokens,
+      break_unit_index: breakUnit?.index ?? -1,
+      break_unit_path: breakUnit?.path,
+      break_unit_role: breakUnit?.role,
+      break_offset_tokens: breakUnit
+        ? Math.min(
+            breakUnit.estimated_tokens,
+            Math.max(estimatedCachedTokens - breakUnit.cumulative_start, 0),
+          )
+        : 0,
+      source: 'cache_boundary_inference',
+      confidence: 'inferred',
+    },
+  };
+}
+
 export function roleCountsFromMessages(messages = []) {
   return messages.reduce((counts, message) => {
     const role = message.role || 'unknown';
@@ -110,4 +175,88 @@ export function cacheStatusBackground(status) {
   if (status === 'miss') return 'var(--semi-color-tertiary)';
   if (status === 'write') return 'var(--semi-color-info)';
   return 'var(--semi-color-info-light-default)';
+}
+
+export function cacheStatusLabel(status, t) {
+  if (status === 'hit') return t('cache_status.hit', { defaultValue: 'hit' });
+  if (status === 'partial')
+    return t('cache_status.partial', { defaultValue: 'partial' });
+  if (status === 'miss')
+    return t('cache_status.miss', { defaultValue: 'miss' });
+  if (status === 'write')
+    return t('cache_status.write', { defaultValue: 'write' });
+  return t('cache_status.unknown', { defaultValue: 'unknown' });
+}
+
+export function confidenceLabel(confidence, t) {
+  if (confidence === 'exact')
+    return t('confidence.exact', { defaultValue: 'exact' });
+  if (confidence === 'inferred')
+    return t('confidence.inferred', { defaultValue: 'inferred' });
+  if (confidence === 'estimated')
+    return t('confidence.estimated', { defaultValue: 'estimated' });
+  return confidence || t('Unknown');
+}
+
+export function roleLabel(role, t) {
+  if (role === 'system') return t('role.system', { defaultValue: 'system' });
+  if (role === 'developer')
+    return t('role.developer', { defaultValue: 'developer' });
+  if (role === 'user') return t('role.user', { defaultValue: 'user' });
+  if (role === 'assistant')
+    return t('role.assistant', { defaultValue: 'assistant' });
+  if (role === 'tool') return t('role.tool', { defaultValue: 'tool' });
+  if (role === 'function')
+    return t('role.function', { defaultValue: 'function' });
+  return role || t('Unknown');
+}
+
+export function unitKindLabel(kind, t) {
+  if (kind === 'text') return t('unit_kind.text', { defaultValue: 'text' });
+  if (kind === 'tool_schema')
+    return t('unit_kind.tool_schema', { defaultValue: 'tool schema' });
+  if (kind === 'tool_choice')
+    return t('unit_kind.tool_choice', { defaultValue: 'tool choice' });
+  if (kind === 'response_format')
+    return t('unit_kind.response_format', { defaultValue: 'response format' });
+  if (kind === 'metadata')
+    return t('unit_kind.metadata', { defaultValue: 'metadata' });
+  return kind || t('Unknown');
+}
+
+export function sourceLabel(source, t) {
+  if (source === 'legacy_message')
+    return t('source.legacy_message', { defaultValue: 'legacy message' });
+  if (source === 'legacy_message_flag')
+    return t('source.legacy_message_flag', {
+      defaultValue: 'legacy message flag',
+    });
+  if (source === 'cache_boundary_inference') {
+    return t('source.cache_boundary_inference', {
+      defaultValue: 'cache boundary inference',
+    });
+  }
+  if (source === 'local_estimate')
+    return t('source.local_estimate', { defaultValue: 'local estimate' });
+  if (source === 'provider_usage')
+    return t('source.provider_usage', { defaultValue: 'provider usage' });
+  if (source === 'billing_inference')
+    return t('source.billing_inference', {
+      defaultValue: 'billing inference',
+    });
+  return source || t('Unknown');
+}
+
+export function finishReasonLabel(reason, t) {
+  if (reason === 'tool_calls')
+    return t('finish_reason.tool_calls', { defaultValue: 'tool calls' });
+  if (reason === 'stop')
+    return t('finish_reason.stop', { defaultValue: 'stop' });
+  if (reason === 'length')
+    return t('finish_reason.length', { defaultValue: 'length' });
+  if (reason === 'content_filter')
+    return t('finish_reason.content_filter', {
+      defaultValue: 'content filter',
+    });
+  return reason || '--';
 }

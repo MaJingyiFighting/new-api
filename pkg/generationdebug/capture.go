@@ -283,6 +283,14 @@ func combinePrompts(inbound, upstream PromptDebug) PromptDebug {
 	inbound.UpstreamTools = upstream.Tools
 	inbound.UpstreamRoleCounts = upstream.RoleCounts
 	inbound.UpstreamTotalEstimatedTokens = upstream.TotalEstimatedTokens
+	if len(upstream.Units) > 0 {
+		inbound.Messages = upstream.Messages
+		inbound.Units = upstream.Units
+		inbound.Instructions = upstream.Instructions
+		inbound.Tools = upstream.Tools
+		inbound.RoleCounts = upstream.RoleCounts
+		inbound.TotalEstimatedTokens = upstream.TotalEstimatedTokens
+	}
 	inbound.Estimated = true
 	return inbound
 }

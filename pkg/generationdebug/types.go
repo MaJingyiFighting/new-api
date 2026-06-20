@@ -46,13 +46,16 @@ type PromptTokenAccounting struct {
 }
 
 type CacheBoundary struct {
-	CachedTokens      int    `json:"cached_tokens"`
-	BreakUnitIndex    int    `json:"break_unit_index"`
-	BreakUnitPath     string `json:"break_unit_path,omitempty"`
-	BreakUnitRole     string `json:"break_unit_role,omitempty"`
-	BreakOffsetTokens int    `json:"break_offset_tokens"`
-	Source            string `json:"source"`
-	Confidence        string `json:"confidence"`
+	CachedTokens          int     `json:"cached_tokens"`
+	PromptTokens          int     `json:"prompt_tokens"`
+	CacheHitRate          float64 `json:"cache_hit_rate"`
+	EstimatedCachedTokens int     `json:"estimated_cached_tokens"`
+	BreakUnitIndex        int     `json:"break_unit_index"`
+	BreakUnitPath         string  `json:"break_unit_path,omitempty"`
+	BreakUnitRole         string  `json:"break_unit_role,omitempty"`
+	BreakOffsetTokens     int     `json:"break_offset_tokens"`
+	Source                string  `json:"source"`
+	Confidence            string  `json:"confidence"`
 }
 
 type PromptDebug struct {

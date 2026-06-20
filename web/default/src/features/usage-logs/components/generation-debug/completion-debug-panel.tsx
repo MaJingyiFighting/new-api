@@ -17,13 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useTranslation } from 'react-i18next'
-import { Label } from '@/components/ui/label'
+
 import { StatusBadge } from '@/components/status-badge'
+import { Label } from '@/components/ui/label'
+
 import { JsonViewer } from './json-viewer'
-import type {
-  CompletionDebugData,
-  GenerationDebugRawValue,
-} from './types'
+import type { CompletionDebugData, GenerationDebugRawValue } from './types'
+import { finishReasonLabel } from './utils'
 
 interface CompletionDebugPanelProps {
   completion: CompletionDebugData | undefined
@@ -35,9 +35,7 @@ export function CompletionDebugPanel(props: CompletionDebugPanelProps) {
 
   if (!props.completion && !props.rawResponse) {
     return (
-      <p className='text-muted-foreground text-xs'>
-        {t('No completion data')}
-      </p>
+      <p className='text-muted-foreground text-xs'>{t('No completion data')}</p>
     )
   }
 
@@ -47,7 +45,7 @@ export function CompletionDebugPanel(props: CompletionDebugPanelProps) {
         <div className='flex flex-wrap gap-2'>
           {props.completion.finish_reason && (
             <StatusBadge
-              label={`${t('Finish Reason')}: ${props.completion.finish_reason}`}
+              label={`${t('Finish Reason')}: ${finishReasonLabel(props.completion.finish_reason, t)}`}
               variant='neutral'
               size='sm'
               copyable={false}

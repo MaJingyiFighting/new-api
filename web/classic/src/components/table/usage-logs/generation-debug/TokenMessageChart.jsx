@@ -19,7 +19,18 @@ For commercial licensing, please contact support@quantumnous.com
 
 import React from 'react';
 import { Card, Typography } from '@douyinfe/semi-ui';
-import { cacheStatusBackground, formatTokens } from './utils';
+import {
+  cacheStatusBackground,
+  cacheStatusLabel,
+  confidenceLabel,
+  formatTokens,
+  roleLabel,
+} from './utils';
+
+const unitHitRate = (unit) =>
+  unit.estimated_tokens > 0
+    ? unit.cache_overlap_tokens / unit.estimated_tokens
+    : 0;
 
 const TokenMessageChart = ({ units, cacheBoundary, t }) => {
   if (!units?.length) return null;
@@ -52,15 +63,25 @@ const TokenMessageChart = ({ units, cacheBoundary, t }) => {
             Math.round(((unit.estimated_tokens || 0) / maxTokens) * 96),
           );
           const isBreakpoint = cacheBoundary?.break_unit_index === unit.index;
+          const hitRate = unitHitRate(unit);
+          const hitPercent = Math.min(100, Math.max(0, hitRate * 100));
           const tooltip = [
             `${t('Path')}: ${unit.path}`,
-            `${t('Role')}: ${unit.role || t('Unknown')}`,
+            `${t('Role')}: ${roleLabel(unit.role, t)}`,
             `${t('Estimated tokens')}: ${formatTokens(unit.estimated_tokens)}`,
             `${t('Cumulative range')}: ${formatTokens(unit.cumulative_start)} - ${formatTokens(unit.cumulative_end)}`,
-            `${t('Cache status')}: ${unit.cache_status}`,
+            `${t('Cache status')}: ${cacheStatusLabel(unit.cache_status, t)}`,
             `${t('Cache overlap')}: ${formatTokens(unit.cache_overlap_tokens)}`,
-            `${t('Confidence')}: ${unit.confidence}`,
+            `${t('Field cache hit rate')}: ${hitRate.toLocaleString(undefined, {
+              style: 'percent',
+              maximumFractionDigits: 1,
+            })}`,
+            `${t('Confidence')}: ${confidenceLabel(unit.confidence, t)}`,
           ].join('\n');
+          const background =
+            unit.cache_status === 'partial'
+              ? `linear-gradient(to top, ${cacheStatusBackground('hit')} 0%, ${cacheStatusBackground('hit')} ${hitPercent}%, ${cacheStatusBackground('partial')} ${hitPercent}%, ${cacheStatusBackground('partial')} 100%)`
+              : cacheStatusBackground(unit.cache_status);
           return (
             <div
               key={`${unit.index}-${unit.path}`}
@@ -71,10 +92,7 @@ const TokenMessageChart = ({ units, cacheBoundary, t }) => {
                 maxWidth: 42,
                 height,
                 borderRadius: '4px 4px 0 0',
-                background:
-                  unit.cache_status === 'partial'
-                    ? `repeating-linear-gradient(45deg, ${cacheStatusBackground(unit.cache_status)}, ${cacheStatusBackground(unit.cache_status)} 4px, transparent 4px, transparent 8px)`
-                    : cacheStatusBackground(unit.cache_status),
+                background,
                 opacity: unit.cache_status === 'miss' ? 0.55 : 0.95,
                 borderLeft: isBreakpoint
                   ? '2px solid var(--semi-color-danger)'
@@ -97,12 +115,13 @@ const TokenMessageChart = ({ units, cacheBoundary, t }) => {
                 background: cacheStatusBackground(status),
               }}
             />
-            {status}
+            {cacheStatusLabel(status, t)}
           </Typography.Text>
         ))}
         {cacheBoundary?.break_unit_path && (
           <Typography.Text type='tertiary' size='small'>
-            {t('Breakpoint')}: {cacheBoundary.break_unit_path}
+            {t('Breakpoint')}: {cacheBoundary.break_unit_path} · {t('offset')}{' '}
+            {formatTokens(cacheBoundary.break_offset_tokens)} {t('tokens')}
           </Typography.Text>
         )}
       </div>

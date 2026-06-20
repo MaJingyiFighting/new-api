@@ -114,7 +114,7 @@ func ApplyPromptAccounting(prompt *PromptDebug, usage *dto.Usage, cache CacheSta
 		CacheWriteSource:     cacheWriteSource,
 		CacheWriteConfidence: cacheWriteConfidence,
 	}
-	applyCacheBoundary(prompt, cache.CachedTokens)
+	applyCacheBoundary(prompt, cache.CachedTokens, promptTokens)
 }
 
 func ExtractOutputFromRawResponse(data []byte) ExtractedOutput {
@@ -337,10 +337,20 @@ func finalizePromptUnits(units []PromptUnit) []PromptUnit {
 	return units
 }
 
-func applyCacheBoundary(prompt *PromptDebug, cachedTokens int) {
+func applyCacheBoundary(prompt *PromptDebug, cachedTokens, promptTokens int) {
 	if cachedTokens < 0 {
 		cachedTokens = 0
 	}
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
+	cacheHitRate := float64(cachedTokens) / float64(max(promptTokens, 1))
+	cacheHitRate = min(max(cacheHitRate, 0), 1)
+	estimatedCachedTokens := cachedTokens
+	if prompt.TotalEstimatedTokens > 0 && promptTokens > 0 {
+		estimatedCachedTokens = int(math.Round(cacheHitRate * float64(prompt.TotalEstimatedTokens)))
+	}
+	estimatedCachedTokens = min(max(estimatedCachedTokens, 0), prompt.TotalEstimatedTokens)
 	breakIndex := -1
 	breakPath := ""
 	breakRole := ""
@@ -348,7 +358,7 @@ func applyCacheBoundary(prompt *PromptDebug, cachedTokens int) {
 	units := prompt.Units
 	for index := range units {
 		unit := &units[index]
-		overlap := min(max(cachedTokens-unit.CumulativeStart, 0), unit.EstimatedTokens)
+		overlap := min(max(estimatedCachedTokens-unit.CumulativeStart, 0), unit.EstimatedTokens)
 		unit.CacheOverlapTokens = overlap
 		unit.CacheSource = "cache_boundary_inference"
 		if overlap <= 0 {
@@ -359,11 +369,11 @@ func applyCacheBoundary(prompt *PromptDebug, cachedTokens int) {
 			unit.CacheStatus = "partial"
 		}
 		unit.Confidence = "inferred"
-		if breakIndex == -1 && unit.EstimatedTokens > 0 && unit.CumulativeEnd > cachedTokens {
+		if breakIndex == -1 && unit.EstimatedTokens > 0 && unit.CumulativeEnd > estimatedCachedTokens {
 			breakIndex = unit.Index
 			breakPath = unit.Path
 			breakRole = unit.Role
-			breakOffset = max(cachedTokens-unit.CumulativeStart, 0)
+			breakOffset = max(estimatedCachedTokens-unit.CumulativeStart, 0)
 		}
 	}
 	prompt.Units = units
@@ -375,13 +385,16 @@ func applyCacheBoundary(prompt *PromptDebug, cachedTokens int) {
 		breakOffset = last.EstimatedTokens
 	}
 	prompt.CacheBoundary = &CacheBoundary{
-		CachedTokens:      cachedTokens,
-		BreakUnitIndex:    breakIndex,
-		BreakUnitPath:     breakPath,
-		BreakUnitRole:     breakRole,
-		BreakOffsetTokens: breakOffset,
-		Source:            "cache_boundary_inference",
-		Confidence:        "inferred",
+		CachedTokens:          cachedTokens,
+		PromptTokens:          promptTokens,
+		CacheHitRate:          cacheHitRate,
+		EstimatedCachedTokens: estimatedCachedTokens,
+		BreakUnitIndex:        breakIndex,
+		BreakUnitPath:         breakPath,
+		BreakUnitRole:         breakRole,
+		BreakOffsetTokens:     breakOffset,
+		Source:                "cache_boundary_inference",
+		Confidence:            "inferred",
 	}
 }
 

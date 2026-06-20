@@ -40,6 +40,7 @@ import { CompletionDebugPanel } from './completion-debug-panel'
 import { PromptDebugPanel } from './prompt-debug-panel'
 import { RawDebugPanel } from './raw-debug-panel'
 import {
+  finishReasonLabel,
   formatGenerationCost,
   formatGenerationLatency,
   formatGenerationThroughput,
@@ -145,9 +146,10 @@ export function GenerationDebugSection(props: GenerationDebugSectionProps) {
         />
         <MetricCard
           label={t('Finish Reason')}
-          value={
-            summary.finish_reason || summary.completion?.finish_reason || '--'
-          }
+          value={finishReasonLabel(
+            summary.finish_reason || summary.completion?.finish_reason,
+            t
+          )}
           icon={RouteIcon}
           mono
           muted={!summary.finish_reason && !summary.completion?.finish_reason}
@@ -196,7 +198,12 @@ export function GenerationDebugSection(props: GenerationDebugSectionProps) {
         />
       </div>
 
-      <PromptDebugPanel prompt={summary.prompt} rawRequest={rawRequest} />
+      <PromptDebugPanel
+        prompt={summary.prompt}
+        rawRequest={rawRequest}
+        providerPromptTokens={summary.prompt_tokens}
+        providerCachedTokens={cachedTokens}
+      />
 
       <Tabs defaultValue='completion' className='min-w-0'>
         <TabsList variant='line' className='w-full justify-start'>

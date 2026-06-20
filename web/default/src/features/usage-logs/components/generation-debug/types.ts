@@ -57,6 +57,9 @@ export interface GenerationDebugTokenAccounting {
 
 export interface GenerationDebugCacheBoundary {
   cached_tokens: number
+  prompt_tokens: number
+  cache_hit_rate: number
+  estimated_cached_tokens: number
   break_unit_index: number
   break_unit_path?: string
   break_unit_role?: string

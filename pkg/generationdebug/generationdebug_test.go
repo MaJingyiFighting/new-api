@@ -158,6 +158,52 @@ func TestPromptCacheBoundaryHitMissAcrossMessages(t *testing.T) {
 	assert.Equal(t, 0, prompt.CacheBoundary.BreakOffsetTokens)
 }
 
+func TestPromptCacheBoundaryScalesProviderTokensToEstimatedFields(t *testing.T) {
+	prompt := ExtractPromptFromRequest([]byte(`{
+		"messages":[
+			{"role":"system","content":"abcdefghijklmnop"},
+			{"role":"user","content":"abcdefghijklmnop"}
+		]
+	}`))
+	usage := &dto.Usage{
+		PromptTokens: 1000,
+		PromptTokensDetails: dto.InputTokenDetails{
+			CachedTokens: 750,
+		},
+	}
+
+	ApplyPromptAccounting(&prompt, usage, BuildCacheStatsFromUsage(usage), "provider_usage", "exact")
+
+	require.NotNil(t, prompt.CacheBoundary)
+	assert.InDelta(t, 0.75, prompt.CacheBoundary.CacheHitRate, 0.0001)
+	assert.Equal(t, 6, prompt.CacheBoundary.EstimatedCachedTokens)
+	assert.Equal(t, 1, prompt.CacheBoundary.BreakUnitIndex)
+	assert.Equal(t, 2, prompt.CacheBoundary.BreakOffsetTokens)
+	assert.Equal(t, "hit", prompt.Units[0].CacheStatus)
+	assert.Equal(t, "partial", prompt.Units[1].CacheStatus)
+	assert.Equal(t, 2, prompt.Units[1].CacheOverlapTokens)
+}
+
+func TestCombinePromptsUsesUpstreamFieldsForProviderAccounting(t *testing.T) {
+	inbound := ExtractPromptFromRequest([]byte(`{
+		"messages":[{"role":"user","content":"inbound"}]
+	}`))
+	upstream := ExtractPromptFromRequest([]byte(`{
+		"messages":[
+			{"role":"system","content":"upstream system"},
+			{"role":"user","content":"upstream user"}
+		]
+	}`))
+
+	combined := combinePrompts(inbound, upstream)
+
+	require.Len(t, combined.Units, 2)
+	assert.Equal(t, upstream.Units, combined.Units)
+	assert.Equal(t, upstream.TotalEstimatedTokens, combined.TotalEstimatedTokens)
+	assert.Equal(t, upstream.RoleCounts, combined.RoleCounts)
+	assert.Equal(t, upstream.Units, combined.UpstreamUnits)
+}
+
 func TestPromptCacheWriteTokensAreNotCacheHitsAndOverrideIsInferred(t *testing.T) {
 	prompt := ExtractPromptFromRequest([]byte(`{
 		"messages":[{"role":"user","content":"abcdefghijklmnop"}]

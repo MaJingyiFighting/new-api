@@ -33,6 +33,12 @@ import type {
   GenerationDebugCacheBoundary,
   GenerationDebugPromptUnit,
 } from './types'
+import {
+  cacheStatusLabel,
+  confidenceLabel,
+  formatGenerationTokens,
+  roleLabel,
+} from './utils'
 
 interface TokenMessageChartProps {
   units: GenerationDebugPromptUnit[]
@@ -42,6 +48,8 @@ interface TokenMessageChartProps {
 interface ChartUnit {
   chartIndex: number
   tokens: number
+  cachedTokens: number
+  uncachedTokens: number
   unit: GenerationDebugPromptUnit
 }
 
@@ -73,7 +81,7 @@ function TokenTooltip(props: {
       <div className='mb-1 font-mono text-[11px]'>{unit.path}</div>
       <div className='grid grid-cols-[7rem_minmax(0,1fr)] gap-x-2 gap-y-1'>
         <span className='text-muted-foreground'>{t('Role')}</span>
-        <span>{unit.role || t('Unknown')}</span>
+        <span>{roleLabel(unit.role, t)}</span>
         <span className='text-muted-foreground'>{t('Estimated tokens')}</span>
         <span>{unit.estimated_tokens.toLocaleString()}</span>
         <span className='text-muted-foreground'>{t('Cumulative range')}</span>
@@ -82,11 +90,23 @@ function TokenTooltip(props: {
           {unit.cumulative_end.toLocaleString()}
         </span>
         <span className='text-muted-foreground'>{t('Cache status')}</span>
-        <span>{unit.cache_status}</span>
+        <span>{cacheStatusLabel(unit.cache_status, t)}</span>
         <span className='text-muted-foreground'>{t('Cache overlap')}</span>
         <span>{unit.cache_overlap_tokens.toLocaleString()}</span>
+        <span className='text-muted-foreground'>
+          {t('Field cache hit rate')}
+        </span>
+        <span>
+          {(unit.estimated_tokens > 0
+            ? unit.cache_overlap_tokens / unit.estimated_tokens
+            : 0
+          ).toLocaleString(undefined, {
+            style: 'percent',
+            maximumFractionDigits: 1,
+          })}
+        </span>
         <span className='text-muted-foreground'>{t('Confidence')}</span>
-        <span>{unit.confidence}</span>
+        <span>{confidenceLabel(unit.confidence, t)}</span>
       </div>
     </div>
   )
@@ -100,6 +120,14 @@ export function TokenMessageChart(props: TokenMessageChartProps) {
       props.units.map((unit) => ({
         chartIndex: unit.index + 1,
         tokens: unit.estimated_tokens,
+        cachedTokens: Math.min(
+          unit.estimated_tokens,
+          Math.max(0, unit.cache_overlap_tokens)
+        ),
+        uncachedTokens: Math.max(
+          0,
+          unit.estimated_tokens - unit.cache_overlap_tokens
+        ),
         unit,
       })),
     [props.units]
@@ -165,21 +193,40 @@ export function TokenMessageChart(props: TokenMessageChartProps) {
                   strokeDasharray='3 3'
                 />
               )}
-            <Bar dataKey='tokens' radius={[2, 2, 0, 0]} minPointSize={2}>
+            <Bar
+              dataKey='cachedTokens'
+              stackId='tokens'
+              minPointSize={0}
+              isAnimationActive={false}
+            >
               {data.map((entry) => (
                 <Cell
-                  key={`${entry.unit.index}-${entry.unit.path}`}
+                  key={`cached-${entry.unit.index}-${entry.unit.path}`}
                   fill={
                     entry.unit.cache_status === 'partial'
                       ? `url(#${patternId})`
-                      : cacheColor(entry.unit.cache_status)
+                      : cacheColor('hit')
                   }
+                  fillOpacity={0.9}
+                />
+              ))}
+            </Bar>
+            <Bar
+              dataKey='uncachedTokens'
+              stackId='tokens'
+              radius={[2, 2, 0, 0]}
+              minPointSize={2}
+              isAnimationActive={false}
+            >
+              {data.map((entry) => (
+                <Cell
+                  key={`uncached-${entry.unit.index}-${entry.unit.path}`}
+                  fill={cacheColor(
+                    entry.unit.cache_status === 'partial'
+                      ? 'partial'
+                      : entry.unit.cache_status
+                  )}
                   fillOpacity={entry.unit.cache_status === 'miss' ? 0.45 : 0.9}
-                  stroke={
-                    entry.unit.cache_status === 'write'
-                      ? 'var(--chart-1)'
-                      : undefined
-                  }
                 />
               ))}
             </Bar>
@@ -194,11 +241,13 @@ export function TokenMessageChart(props: TokenMessageChartProps) {
               style={{ backgroundColor: cacheColor(status) }}
               aria-hidden='true'
             />
-            {status}
+            {cacheStatusLabel(status, t)}
           </span>
         ))}
         {props.cacheBoundary?.break_unit_path && (
-          <span>{`${t('Breakpoint')}: ${props.cacheBoundary.break_unit_path}`}</span>
+          <span>
+            {`${t('Breakpoint')}: ${props.cacheBoundary.break_unit_path} · ${t('offset')} ${formatGenerationTokens(props.cacheBoundary.break_offset_tokens)} ${t('estimated tokens')}`}
+          </span>
         )}
       </div>
     </div>

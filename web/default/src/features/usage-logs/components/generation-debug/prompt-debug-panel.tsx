@@ -37,15 +37,22 @@ import type {
 import {
   cacheStatusLabel,
   cacheStatusVariant,
+  confidenceLabel,
+  derivePromptCacheView,
   formatGenerationTokens,
   normalizedPromptUnits,
+  roleLabel,
   roleCountsFromMessages,
   roleVariant,
+  sourceLabel,
+  unitKindLabel,
 } from './utils'
 
 interface PromptDebugPanelProps {
   prompt: PromptDebugData | undefined
   rawRequest: GenerationDebugRawValue | undefined
+  providerPromptTokens: number
+  providerCachedTokens: number
 }
 
 export function PromptDebugPanel(props: PromptDebugPanelProps) {
@@ -57,10 +64,26 @@ export function PromptDebugPanel(props: PromptDebugPanelProps) {
     () => props.prompt?.messages ?? [],
     [props.prompt?.messages]
   )
-  const units = useMemo(
+  const baseUnits = useMemo(
     () => normalizedPromptUnits(props.prompt),
     [props.prompt]
   )
+  const cacheView = useMemo(
+    () =>
+      derivePromptCacheView(
+        baseUnits,
+        props.providerPromptTokens,
+        props.providerCachedTokens,
+        props.prompt?.cache_boundary
+      ),
+    [
+      baseUnits,
+      props.prompt?.cache_boundary,
+      props.providerCachedTokens,
+      props.providerPromptTokens,
+    ]
+  )
+  const units = cacheView.units
   const selectedUnit = units[selectedUnitIndex] ?? units[0]
   const roleCounts = useMemo(
     () =>
@@ -78,14 +101,19 @@ export function PromptDebugPanel(props: PromptDebugPanelProps) {
 
   return (
     <div className='flex min-w-0 flex-col gap-3'>
-      <CacheBoundaryCard prompt={props.prompt} />
+      <CacheBoundaryCard
+        prompt={props.prompt}
+        providerPromptTokens={props.providerPromptTokens}
+        providerCachedTokens={props.providerCachedTokens}
+        cacheBoundary={cacheView.boundary}
+      />
 
       <div className='grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(420px,0.9fr)_minmax(520px,1.1fr)]'>
         <div className='flex min-w-0 flex-col gap-3'>
           {units.length > 0 && (
             <TokenMessageChart
               units={units}
-              cacheBoundary={props.prompt?.cache_boundary}
+              cacheBoundary={cacheView.boundary}
             />
           )}
           <div className='grid min-w-0 gap-2 sm:grid-cols-2'>
@@ -107,7 +135,7 @@ export function PromptDebugPanel(props: PromptDebugPanelProps) {
                 {Object.entries(roleCounts).map(([role, count]) => (
                   <StatusBadge
                     key={role}
-                    label={`${role} · ${count}`}
+                    label={`${roleLabel(role, t)} · ${count}`}
                     variant={roleVariant(role)}
                     size='sm'
                     copyable={false}
@@ -160,40 +188,53 @@ export function PromptDebugPanel(props: PromptDebugPanelProps) {
   )
 }
 
-function CacheBoundaryCard(props: { prompt: PromptDebugData | undefined }) {
+function CacheBoundaryCard(props: {
+  prompt: PromptDebugData | undefined
+  providerPromptTokens: number
+  providerCachedTokens: number
+  cacheBoundary: PromptDebugData['cache_boundary']
+}) {
   const { t } = useTranslation()
   const accounting = props.prompt?.token_accounting
-  const boundary = props.prompt?.cache_boundary
   const promptTokens =
-    accounting?.prompt_tokens ?? props.prompt?.total_estimated_tokens ?? 0
-  const cachedTokens = accounting?.cached_tokens ?? boundary?.cached_tokens ?? 0
-  const cacheHitRate = promptTokens > 0 ? cachedTokens / promptTokens : 0
-  const breakpointText = boundary?.break_unit_path
-    ? `${boundary.break_unit_path} · ${t('offset')} ${boundary.break_offset_tokens} ${t('tokens')}`
+    props.providerPromptTokens ||
+    accounting?.prompt_tokens ||
+    props.prompt?.total_estimated_tokens ||
+    0
+  const cachedTokens = props.providerCachedTokens
+  const cacheHitRate =
+    props.cacheBoundary?.cache_hit_rate ??
+    (promptTokens > 0 ? cachedTokens / promptTokens : 0)
+  const breakpointText = props.cacheBoundary?.break_unit_path
+    ? `${props.cacheBoundary.break_unit_path} · ${t('offset')} ${formatGenerationTokens(props.cacheBoundary.break_offset_tokens)} ${t('estimated tokens')}`
     : t('No prompt field breakpoint')
 
   return (
     <div className='bg-muted/30 grid min-w-0 gap-2 rounded-md border p-3 text-xs md:grid-cols-4'>
       <MetricLine
         label={t('Provider prompt tokens')}
-        value={`${formatGenerationTokens(promptTokens)} ${accounting?.confidence ?? 'estimated'}`}
+        value={`${formatGenerationTokens(promptTokens)} ${confidenceLabel('exact', t)}`}
       />
       <MetricLine
         label={t('Provider cached tokens')}
-        value={`${formatGenerationTokens(cachedTokens)} ${accounting?.confidence ?? 'estimated'}`}
+        value={`${formatGenerationTokens(cachedTokens)} ${confidenceLabel('exact', t)}`}
       />
       <MetricLine
         label={t('Cache hit rate')}
-        value={`${cacheHitRate.toLocaleString(undefined, {
-          style: 'percent',
-          maximumFractionDigits: 1,
-        })} ${t('exact-total / inferred-field')}`}
+        value={`${formatGenerationTokens(cachedTokens)} / ${formatGenerationTokens(promptTokens)} · ${cacheHitRate.toLocaleString(
+          undefined,
+          {
+            style: 'percent',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          }
+        )} ${t('exact-total / inferred-field')}`}
       />
       <MetricLine label={t('Breakpoint')} value={breakpointText} mono />
       {accounting && accounting.cache_write_tokens > 0 && (
         <div className='md:col-span-4'>
           <StatusBadge
-            label={`${t('Cache write tokens')}: ${formatGenerationTokens(accounting.cache_write_tokens)} · ${accounting.cache_write_confidence ?? accounting.confidence}`}
+            label={`${t('Cache write tokens')}: ${formatGenerationTokens(accounting.cache_write_tokens)} · ${confidenceLabel(accounting.cache_write_confidence ?? accounting.confidence, t)}`}
             variant='blue'
             size='sm'
             copyable={false}
@@ -256,13 +297,13 @@ function UnitList(props: {
                   #{unit.index + 1}
                 </span>
                 <StatusBadge
-                  label={unit.role || t('Unknown')}
+                  label={roleLabel(unit.role, t)}
                   variant={roleVariant(unit.role ?? '')}
                   size='sm'
                   copyable={false}
                 />
                 <StatusBadge
-                  label={cacheStatusLabel(unit.cache_status)}
+                  label={cacheStatusLabel(unit.cache_status, t)}
                   variant={cacheStatusVariant(unit.cache_status)}
                   size='sm'
                   copyable={false}
@@ -307,19 +348,19 @@ function UnitDetail(props: {
       <div className='flex min-w-0 flex-wrap items-center justify-between gap-2'>
         <div className='flex min-w-0 flex-wrap items-center gap-2'>
           <StatusBadge
-            label={props.unit.role || t('Unknown')}
+            label={roleLabel(props.unit.role, t)}
             variant={roleVariant(props.unit.role ?? '')}
             size='sm'
             copyable={false}
           />
           <StatusBadge
-            label={cacheStatusLabel(props.unit.cache_status)}
+            label={cacheStatusLabel(props.unit.cache_status, t)}
             variant={cacheStatusVariant(props.unit.cache_status)}
             size='sm'
             copyable={false}
           />
           <StatusBadge
-            label={props.unit.confidence}
+            label={confidenceLabel(props.unit.confidence, t)}
             variant='grey'
             size='sm'
             copyable={false}
@@ -341,7 +382,10 @@ function UnitDetail(props: {
       </div>
       <div className='grid gap-2 text-xs sm:grid-cols-2'>
         <MetricLine label={t('Path')} value={props.unit.path} mono />
-        <MetricLine label={t('Kind')} value={props.unit.kind} />
+        <MetricLine
+          label={t('Kind')}
+          value={unitKindLabel(props.unit.kind, t)}
+        />
         <MetricLine
           label={t('Estimated tokens')}
           value={formatGenerationTokens(props.unit.estimated_tokens)}
@@ -354,7 +398,10 @@ function UnitDetail(props: {
           label={t('Cache overlap')}
           value={formatGenerationTokens(props.unit.cache_overlap_tokens)}
         />
-        <MetricLine label={t('Cache source')} value={props.unit.cache_source} />
+        <MetricLine
+          label={t('Cache source')}
+          value={sourceLabel(props.unit.cache_source, t)}
+        />
       </div>
       <ScrollArea className='bg-background/60 h-[min(38dvh,360px)] min-w-0 rounded-md border'>
         <p className='p-3 text-xs leading-relaxed break-words whitespace-pre-wrap'>

@@ -20,6 +20,7 @@ import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 
 import type {
   CacheStatus,
+  GenerationDebugCacheBoundary,
   GenerationDebugMessage,
   GenerationDebugPromptUnit,
   GenerationDebugRawValue,
@@ -126,13 +127,125 @@ export function cacheStatusVariant(
 }
 
 export function cacheStatusLabel(
-  status: CacheStatus | string | undefined
+  status: CacheStatus | string | undefined,
+  t: (key: string, options?: { defaultValue: string }) => string
 ): string {
-  if (status === 'hit') return 'hit'
-  if (status === 'partial') return 'partial'
-  if (status === 'miss') return 'miss'
-  if (status === 'write') return 'write'
-  return 'unknown'
+  if (status === 'hit') return t('cache_status.hit', { defaultValue: 'hit' })
+  if (status === 'partial') {
+    return t('cache_status.partial', { defaultValue: 'partial' })
+  }
+  if (status === 'miss') return t('cache_status.miss', { defaultValue: 'miss' })
+  if (status === 'write') {
+    return t('cache_status.write', { defaultValue: 'write' })
+  }
+  return t('cache_status.unknown', { defaultValue: 'unknown' })
+}
+
+export function confidenceLabel(
+  confidence: string | undefined,
+  t: (key: string, options?: { defaultValue: string }) => string
+): string {
+  if (confidence === 'exact') {
+    return t('confidence.exact', { defaultValue: 'exact' })
+  }
+  if (confidence === 'inferred') {
+    return t('confidence.inferred', { defaultValue: 'inferred' })
+  }
+  if (confidence === 'estimated') {
+    return t('confidence.estimated', { defaultValue: 'estimated' })
+  }
+  return confidence || t('Unknown')
+}
+
+export function roleLabel(
+  role: string | undefined,
+  t: (key: string, options?: { defaultValue: string }) => string
+): string {
+  if (role === 'system') return t('role.system', { defaultValue: 'system' })
+  if (role === 'developer') {
+    return t('role.developer', { defaultValue: 'developer' })
+  }
+  if (role === 'user') return t('role.user', { defaultValue: 'user' })
+  if (role === 'assistant') {
+    return t('role.assistant', { defaultValue: 'assistant' })
+  }
+  if (role === 'tool') return t('role.tool', { defaultValue: 'tool' })
+  if (role === 'function') {
+    return t('role.function', { defaultValue: 'function' })
+  }
+  return role || t('Unknown')
+}
+
+export function unitKindLabel(
+  kind: string | undefined,
+  t: (key: string, options?: { defaultValue: string }) => string
+): string {
+  if (kind === 'text') return t('unit_kind.text', { defaultValue: 'text' })
+  if (kind === 'tool_schema') {
+    return t('unit_kind.tool_schema', { defaultValue: 'tool schema' })
+  }
+  if (kind === 'tool_choice') {
+    return t('unit_kind.tool_choice', { defaultValue: 'tool choice' })
+  }
+  if (kind === 'response_format') {
+    return t('unit_kind.response_format', { defaultValue: 'response format' })
+  }
+  if (kind === 'metadata') {
+    return t('unit_kind.metadata', { defaultValue: 'metadata' })
+  }
+  return kind || t('Unknown')
+}
+
+export function sourceLabel(
+  source: string | undefined,
+  t: (key: string, options?: { defaultValue: string }) => string
+): string {
+  if (source === 'legacy_message') {
+    return t('source.legacy_message', { defaultValue: 'legacy message' })
+  }
+  if (source === 'legacy_message_flag') {
+    return t('source.legacy_message_flag', {
+      defaultValue: 'legacy message flag',
+    })
+  }
+  if (source === 'cache_boundary_inference') {
+    return t('source.cache_boundary_inference', {
+      defaultValue: 'cache boundary inference',
+    })
+  }
+  if (source === 'local_estimate') {
+    return t('source.local_estimate', { defaultValue: 'local estimate' })
+  }
+  if (source === 'provider_usage') {
+    return t('source.provider_usage', { defaultValue: 'provider usage' })
+  }
+  if (source === 'billing_inference') {
+    return t('source.billing_inference', {
+      defaultValue: 'billing inference',
+    })
+  }
+  return source || t('Unknown')
+}
+
+export function finishReasonLabel(
+  reason: string | undefined,
+  t: (key: string, options?: { defaultValue: string }) => string
+): string {
+  if (reason === 'tool_calls') {
+    return t('finish_reason.tool_calls', { defaultValue: 'tool calls' })
+  }
+  if (reason === 'stop') {
+    return t('finish_reason.stop', { defaultValue: 'stop' })
+  }
+  if (reason === 'length') {
+    return t('finish_reason.length', { defaultValue: 'length' })
+  }
+  if (reason === 'content_filter') {
+    return t('finish_reason.content_filter', {
+      defaultValue: 'content filter',
+    })
+  }
+  return reason || '--'
 }
 
 export function normalizedPromptUnits(
@@ -161,6 +274,75 @@ export function normalizedPromptUnits(
       confidence: message.cached ? 'inferred' : 'estimated',
     }
   })
+}
+
+export function derivePromptCacheView(
+  units: GenerationDebugPromptUnit[],
+  promptTokens: number,
+  cachedTokens: number,
+  existingBoundary?: GenerationDebugCacheBoundary
+): {
+  units: GenerationDebugPromptUnit[]
+  boundary?: GenerationDebugCacheBoundary
+} {
+  if (units.length === 0 || promptTokens <= 0) {
+    return { units, boundary: existingBoundary }
+  }
+  const hitRate = Math.min(1, Math.max(0, cachedTokens / promptTokens))
+  const estimatedTotal = units.reduce(
+    (total, unit) => Math.max(total, unit.cumulative_end || 0),
+    0
+  )
+  const estimatedCachedTokens = Math.round(hitRate * estimatedTotal)
+  let breakUnit: GenerationDebugPromptUnit | undefined
+  const resolvedUnits = units.map((unit) => {
+    const overlap = Math.min(
+      Math.max(estimatedCachedTokens - unit.cumulative_start, 0),
+      unit.estimated_tokens
+    )
+    let cacheStatus: CacheStatus = 'partial'
+    if (overlap <= 0) {
+      cacheStatus = 'miss'
+    } else if (overlap >= unit.estimated_tokens) {
+      cacheStatus = 'hit'
+    }
+    if (
+      !breakUnit &&
+      unit.estimated_tokens > 0 &&
+      unit.cumulative_end > estimatedCachedTokens
+    ) {
+      breakUnit = unit
+    }
+    return {
+      ...unit,
+      cache_overlap_tokens: overlap,
+      cache_status: cacheStatus,
+      cache_source: 'cache_boundary_inference',
+      confidence: 'inferred' as const,
+    }
+  })
+  if (!breakUnit) breakUnit = units.at(-1)
+  return {
+    units: resolvedUnits,
+    boundary: {
+      ...existingBoundary,
+      cached_tokens: cachedTokens,
+      prompt_tokens: promptTokens,
+      cache_hit_rate: hitRate,
+      estimated_cached_tokens: estimatedCachedTokens,
+      break_unit_index: breakUnit?.index ?? -1,
+      break_unit_path: breakUnit?.path,
+      break_unit_role: breakUnit?.role,
+      break_offset_tokens: breakUnit
+        ? Math.min(
+            breakUnit.estimated_tokens,
+            Math.max(estimatedCachedTokens - breakUnit.cumulative_start, 0)
+          )
+        : 0,
+      source: 'cache_boundary_inference',
+      confidence: 'inferred',
+    },
+  }
 }
 
 export function rawValueContent(
