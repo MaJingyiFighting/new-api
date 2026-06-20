@@ -361,7 +361,14 @@ func applyCacheBoundary(prompt *PromptDebug, cachedTokens, promptTokens int) {
 		overlap := min(max(estimatedCachedTokens-unit.CumulativeStart, 0), unit.EstimatedTokens)
 		unit.CacheOverlapTokens = overlap
 		unit.CacheSource = "cache_boundary_inference"
-		if overlap <= 0 {
+		if unit.EstimatedTokens == 0 {
+			if unit.CumulativeStart < estimatedCachedTokens ||
+				(estimatedCachedTokens > 0 && estimatedCachedTokens >= prompt.TotalEstimatedTokens) {
+				unit.CacheStatus = "hit"
+			} else {
+				unit.CacheStatus = "miss"
+			}
+		} else if overlap <= 0 {
 			unit.CacheStatus = "miss"
 		} else if overlap >= unit.EstimatedTokens {
 			unit.CacheStatus = "hit"

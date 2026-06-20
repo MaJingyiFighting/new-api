@@ -301,7 +301,13 @@ export function derivePromptCacheView(
       unit.estimated_tokens
     )
     let cacheStatus: CacheStatus = 'partial'
-    if (overlap <= 0) {
+    if (unit.estimated_tokens === 0) {
+      cacheStatus =
+        unit.cumulative_start < estimatedCachedTokens ||
+        (estimatedCachedTokens > 0 && estimatedCachedTokens >= estimatedTotal)
+          ? 'hit'
+          : 'miss'
+    } else if (overlap <= 0) {
       cacheStatus = 'miss'
     } else if (overlap >= unit.estimated_tokens) {
       cacheStatus = 'hit'

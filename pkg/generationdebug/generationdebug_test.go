@@ -184,6 +184,25 @@ func TestPromptCacheBoundaryScalesProviderTokensToEstimatedFields(t *testing.T) 
 	assert.Equal(t, 2, prompt.Units[1].CacheOverlapTokens)
 }
 
+func TestPromptCacheBoundaryZeroTokenUnitDoesNotCreateFalseGap(t *testing.T) {
+	prompt := PromptDebug{
+		TotalEstimatedTokens: 8,
+		Units: []PromptUnit{
+			{Index: 0, EstimatedTokens: 4, CumulativeStart: 0, CumulativeEnd: 4},
+			{Index: 1, EstimatedTokens: 0, CumulativeStart: 4, CumulativeEnd: 4},
+			{Index: 2, EstimatedTokens: 4, CumulativeStart: 4, CumulativeEnd: 8},
+		},
+	}
+
+	applyCacheBoundary(&prompt, 6, 8)
+
+	assert.Equal(t, "hit", prompt.Units[0].CacheStatus)
+	assert.Equal(t, "hit", prompt.Units[1].CacheStatus)
+	assert.Equal(t, "partial", prompt.Units[2].CacheStatus)
+	assert.Equal(t, 2, prompt.CacheBoundary.BreakUnitIndex)
+	assert.Equal(t, 2, prompt.CacheBoundary.BreakOffsetTokens)
+}
+
 func TestCombinePromptsUsesUpstreamFieldsForProviderAccounting(t *testing.T) {
 	inbound := ExtractPromptFromRequest([]byte(`{
 		"messages":[{"role":"user","content":"inbound"}]

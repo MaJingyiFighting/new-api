@@ -109,6 +109,18 @@ export function derivePromptCacheView(
       Math.max(estimatedCachedTokens - unit.cumulative_start, 0),
       unit.estimated_tokens,
     );
+    let cacheStatus = 'partial';
+    if (unit.estimated_tokens === 0) {
+      cacheStatus =
+        unit.cumulative_start < estimatedCachedTokens ||
+        (estimatedCachedTokens > 0 && estimatedCachedTokens >= estimatedTotal)
+          ? 'hit'
+          : 'miss';
+    } else if (overlap <= 0) {
+      cacheStatus = 'miss';
+    } else if (overlap >= unit.estimated_tokens) {
+      cacheStatus = 'hit';
+    }
     if (
       !breakUnit &&
       unit.estimated_tokens > 0 &&
@@ -119,12 +131,7 @@ export function derivePromptCacheView(
     return {
       ...unit,
       cache_overlap_tokens: overlap,
-      cache_status:
-        overlap <= 0
-          ? 'miss'
-          : overlap >= unit.estimated_tokens
-            ? 'hit'
-            : 'partial',
+      cache_status: cacheStatus,
       cache_source: 'cache_boundary_inference',
       confidence: 'inferred',
     };
