@@ -32,17 +32,18 @@ import {
   LogIn,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+
+import { Dialog } from '@/components/dialog'
+import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
+import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { DynamicPricingBreakdown } from '@/features/pricing/components/dynamic-pricing-breakdown'
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatLogQuota, formatTokens, formatUseTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
-import { Button } from '@/components/ui/button'
-import { Label } from '@/components/ui/label'
-import { Dialog } from '@/components/dialog'
-import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
-import { DynamicPricingBreakdown } from '@/features/pricing/components/dynamic-pricing-breakdown'
+
 import type { UsageLog } from '../../data/schema'
-import { GenerationDebugSection } from '../generation-debug/generation-debug-section'
 import {
   parseLogOther,
   getParamOverrideActionLabel,
@@ -61,6 +62,7 @@ import {
   isTimingLogType,
 } from '../../lib/utils'
 import type { LogOtherData } from '../../types'
+import { GenerationDebugSection } from '../generation-debug/generation-debug-section'
 
 // Maps a channel-update changed-field token (as recorded by the backend audit)
 // to its i18n label key for display in the audit details.
@@ -325,8 +327,13 @@ function BillingBreakdown(props: {
 
   return (
     <DetailSection label={t('Billing Details')}>
-      {rows.map((row, idx) => (
-        <DetailRow key={idx} label={row.label} value={row.value} mono />
+      {rows.map((row) => (
+        <DetailRow
+          key={String(row.label)}
+          label={row.label}
+          value={row.value}
+          mono
+        />
       ))}
     </DetailSection>
   )
@@ -391,8 +398,13 @@ function TokenBreakdown(props: { log: UsageLog; other: LogOtherData }) {
 
   return (
     <DetailSection label={t('Token Breakdown')}>
-      {rows.map((row, idx) => (
-        <DetailRow key={idx} label={row.label} value={row.value} mono />
+      {rows.map((row) => (
+        <DetailRow
+          key={String(row.label)}
+          label={row.label}
+          value={row.value}
+          mono
+        />
       ))}
     </DetailSection>
   )
@@ -410,6 +422,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
   const details = props.log.content ?? ''
   const other = parseLogOther(props.log.other)
+  const hasGenerationDebug = !!other?.generation_debug
   const typeConfig = getLogTypeConfig(props.log.type)
 
   const isViolation = isViolationFeeLog(other)
@@ -423,6 +436,12 @@ export function DetailsDialog(props: DetailsDialogProps) {
     !isViolation &&
     other?.billing_mode === 'tiered_expr' &&
     !!other?.expr_b64
+  let dialogWidthClass = 'sm:max-w-lg'
+  if (hasGenerationDebug) {
+    dialogWidthClass = 'sm:max-w-[min(96vw,1280px)] lg:max-w-[min(96vw,1440px)]'
+  } else if (isTieredBilling) {
+    dialogWidthClass = 'sm:max-w-4xl lg:max-w-5xl'
+  }
   const hasAudioTokens = other?.ws || other?.audio
   const showTiming = isTimingLogType(props.log.type)
   const showAdminIp =
@@ -478,6 +497,11 @@ export function DetailsDialog(props: DetailsDialogProps) {
     if (adminInfo.auth_method === 'access_token') return t('Access Token')
     if (adminInfo.auth_method === 'session') return t('Session')
     return String(adminInfo.auth_method)
+  })()
+  const reasoningEffortVariant = (() => {
+    if (other?.reasoning_effort === 'high') return 'orange'
+    if (other?.reasoning_effort === 'medium') return 'yellow'
+    return 'green'
   })()
 
   // Localized operation text rendered from the language-independent op
@@ -553,15 +577,22 @@ export function DetailsDialog(props: DetailsDialogProps) {
       contentClassName={cn(
         'min-w-0 overflow-hidden',
         'max-sm:max-h-[calc(100dvh-1.5rem)] max-sm:w-[calc(100vw-1.5rem)] max-sm:max-w-[calc(100vw-1.5rem)] max-sm:p-4',
-        isTieredBilling ? 'sm:max-w-4xl lg:max-w-5xl' : 'sm:max-w-lg'
+        dialogWidthClass
       )}
       headerClassName='max-sm:gap-1'
       titleClassName='flex items-center gap-2 text-base'
       descriptionClassName='sr-only'
-      contentHeight='min(72dvh, 720px)'
-      bodyClassName='pr-2 sm:pr-4'
+      contentHeight={
+        hasGenerationDebug ? 'min(88dvh, 920px)' : 'min(72dvh, 720px)'
+      }
+      bodyClassName={hasGenerationDebug ? 'pr-0' : 'pr-2 sm:pr-4'}
     >
-      <div className='w-full max-w-full min-w-0 space-y-2.5 overflow-x-hidden py-1 sm:space-y-3'>
+      <div
+        className={cn(
+          'w-full max-w-full min-w-0 space-y-2.5 py-1 sm:space-y-3',
+          !hasGenerationDebug && 'overflow-x-hidden'
+        )}
+      >
         {/* Overview section - key identifiers */}
         <div className='min-w-0 space-y-1'>
           {props.log.request_id && (
@@ -760,9 +791,9 @@ export function DetailsDialog(props: DetailsDialogProps) {
             icon={<ShieldCheck className='size-3.5' aria-hidden='true' />}
             label={t('Top-up Audit Info')}
           >
-            {topupAuditFields.map((field, idx) => (
+            {topupAuditFields.map((field) => (
               <DetailRow
-                key={idx}
+                key={String(field.label)}
                 label={field.label}
                 value={field.value}
                 mono
@@ -849,9 +880,9 @@ export function DetailsDialog(props: DetailsDialogProps) {
             {operationText != null && (
               <DetailRow label={t('Operation')} value={operationText} />
             )}
-            {loginAuditFields.map((field, idx) => (
+            {loginAuditFields.map((field) => (
               <DetailRow
-                key={idx}
+                key={String(field.label)}
                 label={field.label}
                 value={field.value}
                 mono
@@ -904,13 +935,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
             value={
               <StatusBadge
                 label={other.reasoning_effort}
-                variant={
-                  other.reasoning_effort === 'high'
-                    ? 'orange'
-                    : other.reasoning_effort === 'medium'
-                      ? 'yellow'
-                      : 'green'
-                }
+                variant={reasoningEffortVariant}
                 size='sm'
                 copyable={false}
               />
@@ -949,7 +974,11 @@ export function DetailsDialog(props: DetailsDialogProps) {
           </DetailSection>
         )}
 
-        <GenerationDebugSection log={props.log} other={other} isAdmin={props.isAdmin} />
+        <GenerationDebugSection
+          log={props.log}
+          other={other}
+          isAdmin={props.isAdmin}
+        />
 
         {/* Token breakdown (for consume/error types with token data) */}
         {isDisplayableType(props.log.type) && other && (
@@ -1097,12 +1126,12 @@ export function DetailsDialog(props: DetailsDialogProps) {
             icon={<Settings2 className='size-3.5' aria-hidden='true' />}
             label={`${t('Param Override')} (${other.po.length})`}
           >
-            {other.po.filter(Boolean).map((line, idx) => {
+            {other.po.filter(Boolean).map((line) => {
               const parsed = parseAuditLine(line)
               if (!parsed) return null
               return (
                 <div
-                  key={idx}
+                  key={line}
                   className='bg-background/60 flex min-w-0 flex-col gap-1.5 rounded border p-2 sm:flex-row sm:items-start sm:gap-2'
                 >
                   <StatusBadge

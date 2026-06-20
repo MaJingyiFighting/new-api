@@ -98,7 +98,7 @@ export function CompletionDebugPanel(props: CompletionDebugPanelProps) {
           label={t('Raw response')}
           value={props.rawResponse.value}
           rawMeta={props.rawResponse}
-          maxHeightClassName='h-64'
+          maxHeightClassName='h-[min(55dvh,560px)]'
         />
       )}
     </div>

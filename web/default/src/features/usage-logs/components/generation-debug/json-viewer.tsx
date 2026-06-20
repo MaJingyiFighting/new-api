@@ -18,11 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { CheckIcon, CopyIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
-import { cn } from '@/lib/utils'
+
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { cn } from '@/lib/utils'
+
 import type { GenerationDebugRawValue } from './types'
 import { stringifyDebugValue } from './utils'
 
@@ -72,7 +74,7 @@ export function JsonViewer(props: JsonViewerProps) {
       </div>
       <ScrollArea
         className={cn(
-          'bg-muted/30 h-56 min-w-0 rounded-md border',
+          'bg-muted/30 h-[min(55dvh,560px)] min-w-0 rounded-md border',
           props.maxHeightClassName
         )}
       >

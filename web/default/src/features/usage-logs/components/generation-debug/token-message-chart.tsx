@@ -16,51 +16,93 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMemo } from 'react'
+import { useId, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   Bar,
   BarChart,
   Cell,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts'
-import type { GenerationDebugMessage } from './types'
+
+import type {
+  GenerationDebugCacheBoundary,
+  GenerationDebugPromptUnit,
+} from './types'
 
 interface TokenMessageChartProps {
-  messages: GenerationDebugMessage[]
+  units: GenerationDebugPromptUnit[]
+  cacheBoundary?: GenerationDebugCacheBoundary
 }
 
-function roleColor(role: string): string {
-  switch (role.toLowerCase()) {
-    case 'assistant':
-      return 'var(--chart-1)'
-    case 'user':
-      return 'var(--chart-2)'
-    case 'system':
-    case 'developer':
-      return 'var(--chart-4)'
-    case 'tool':
-    case 'function':
-      return 'var(--chart-3)'
-    default:
+interface ChartUnit {
+  chartIndex: number
+  tokens: number
+  unit: GenerationDebugPromptUnit
+}
+
+function cacheColor(status: string): string {
+  switch (status) {
+    case 'hit':
+      return 'var(--success)'
+    case 'partial':
+      return 'var(--warning)'
+    case 'miss':
       return 'var(--muted-foreground)'
+    case 'write':
+      return 'var(--chart-1)'
+    default:
+      return 'var(--chart-2)'
   }
+}
+
+function TokenTooltip(props: {
+  active?: boolean
+  payload?: Array<{ payload: ChartUnit }>
+}) {
+  const { t } = useTranslation()
+  const unit = props.payload?.[0]?.payload.unit
+  if (!props.active || !unit) return null
+
+  return (
+    <div className='bg-background min-w-56 rounded-md border p-2 text-xs shadow-sm'>
+      <div className='mb-1 font-mono text-[11px]'>{unit.path}</div>
+      <div className='grid grid-cols-[7rem_minmax(0,1fr)] gap-x-2 gap-y-1'>
+        <span className='text-muted-foreground'>{t('Role')}</span>
+        <span>{unit.role || t('Unknown')}</span>
+        <span className='text-muted-foreground'>{t('Estimated tokens')}</span>
+        <span>{unit.estimated_tokens.toLocaleString()}</span>
+        <span className='text-muted-foreground'>{t('Cumulative range')}</span>
+        <span>
+          {unit.cumulative_start.toLocaleString()} -{' '}
+          {unit.cumulative_end.toLocaleString()}
+        </span>
+        <span className='text-muted-foreground'>{t('Cache status')}</span>
+        <span>{unit.cache_status}</span>
+        <span className='text-muted-foreground'>{t('Cache overlap')}</span>
+        <span>{unit.cache_overlap_tokens.toLocaleString()}</span>
+        <span className='text-muted-foreground'>{t('Confidence')}</span>
+        <span>{unit.confidence}</span>
+      </div>
+    </div>
+  )
 }
 
 export function TokenMessageChart(props: TokenMessageChartProps) {
   const { t } = useTranslation()
+  const patternId = useId().replaceAll(':', '')
   const data = useMemo(
     () =>
-      props.messages.map((message) => ({
-        index: message.index + 1,
-        tokens: message.estimated_tokens,
-        role: message.role || 'unknown',
-        cached: message.cached,
+      props.units.map((unit) => ({
+        chartIndex: unit.index + 1,
+        tokens: unit.estimated_tokens,
+        unit,
       })),
-    [props.messages]
+    [props.units]
   )
 
   if (data.length === 0) return null
@@ -68,9 +110,11 @@ export function TokenMessageChart(props: TokenMessageChartProps) {
   return (
     <div className='flex min-w-0 flex-col gap-2 rounded-md border p-2.5'>
       <div className='flex flex-wrap items-baseline justify-between gap-2'>
-        <span className='text-xs font-semibold'>{t('Tokens per message')}</span>
+        <span className='text-xs font-semibold'>
+          {t('Tokens per prompt field')}
+        </span>
         <span className='text-muted-foreground text-[11px]'>
-          {t('Estimated values, not used for billing')}
+          {t('Field attribution is inferred')}
         </span>
       </div>
       <div className='h-28 min-w-0'>
@@ -79,15 +123,33 @@ export function TokenMessageChart(props: TokenMessageChartProps) {
             data={data}
             margin={{ top: 4, right: 2, bottom: 0, left: 2 }}
           >
-            <XAxis dataKey='index' hide />
+            <defs>
+              <pattern
+                id={patternId}
+                patternUnits='userSpaceOnUse'
+                width='6'
+                height='6'
+                patternTransform='rotate(45)'
+              >
+                <rect
+                  width='6'
+                  height='6'
+                  fill='var(--warning)'
+                  opacity='0.35'
+                />
+                <rect
+                  width='2'
+                  height='6'
+                  fill='var(--warning)'
+                  opacity='0.9'
+                />
+              </pattern>
+            </defs>
+            <XAxis dataKey='chartIndex' hide />
             <YAxis hide />
             <Tooltip
               cursor={{ fill: 'var(--muted)', opacity: 0.45 }}
-              formatter={(value, _name, item) => [
-                `${Number(value).toLocaleString()} ${t('tokens')} (${t('estimated')})`,
-                String(item.payload.role),
-              ]}
-              labelFormatter={(value) => `${t('Message')} #${value}`}
+              content={<TokenTooltip />}
               contentStyle={{
                 borderRadius: '8px',
                 borderColor: 'var(--border)',
@@ -95,12 +157,29 @@ export function TokenMessageChart(props: TokenMessageChartProps) {
                 fontSize: '12px',
               }}
             />
+            {props.cacheBoundary &&
+              props.cacheBoundary.break_unit_index >= 0 && (
+                <ReferenceLine
+                  x={props.cacheBoundary.break_unit_index + 1}
+                  stroke='var(--destructive)'
+                  strokeDasharray='3 3'
+                />
+              )}
             <Bar dataKey='tokens' radius={[2, 2, 0, 0]} minPointSize={2}>
               {data.map((entry) => (
                 <Cell
-                  key={`${entry.index}-${entry.role}`}
-                  fill={roleColor(entry.role)}
-                  fillOpacity={entry.cached ? 0.35 : 0.9}
+                  key={`${entry.unit.index}-${entry.unit.path}`}
+                  fill={
+                    entry.unit.cache_status === 'partial'
+                      ? `url(#${patternId})`
+                      : cacheColor(entry.unit.cache_status)
+                  }
+                  fillOpacity={entry.unit.cache_status === 'miss' ? 0.45 : 0.9}
+                  stroke={
+                    entry.unit.cache_status === 'write'
+                      ? 'var(--chart-1)'
+                      : undefined
+                  }
                 />
               ))}
             </Bar>
@@ -108,17 +187,19 @@ export function TokenMessageChart(props: TokenMessageChartProps) {
         </ResponsiveContainer>
       </div>
       <div className='text-muted-foreground flex flex-wrap gap-x-3 gap-y-1 text-[11px]'>
-        {[...new Set(data.map((entry) => entry.role))].map((role) => (
-          <span key={role} className='flex items-center gap-1'>
+        {(['hit', 'partial', 'miss', 'unknown'] as const).map((status) => (
+          <span key={status} className='flex items-center gap-1'>
             <span
               className='size-2 rounded-full'
-              style={{ backgroundColor: roleColor(role) }}
+              style={{ backgroundColor: cacheColor(status) }}
               aria-hidden='true'
             />
-            {role}
+            {status}
           </span>
         ))}
-        {data.some((entry) => entry.cached) && <span>{t('Faded = cached')}</span>}
+        {props.cacheBoundary?.break_unit_path && (
+          <span>{`${t('Breakpoint')}: ${props.cacheBoundary.break_unit_path}`}</span>
+        )}
       </div>
     </div>
   )

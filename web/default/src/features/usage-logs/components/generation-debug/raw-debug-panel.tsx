@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useTranslation } from 'react-i18next'
+
 import { JsonViewer } from './json-viewer'
 import type { GenerationDebugRaw } from './types'
 
@@ -45,7 +46,7 @@ export function RawDebugPanel(props: RawDebugPanelProps) {
               label={label}
               value={value.value}
               rawMeta={value}
-              maxHeightClassName='h-72'
+              maxHeightClassName='h-[min(55dvh,560px)]'
             />
           )
       )}

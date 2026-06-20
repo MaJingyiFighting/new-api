@@ -24,9 +24,52 @@ export interface GenerationDebugMessage {
   index: number
 }
 
+export type CacheStatus = 'hit' | 'partial' | 'miss' | 'write' | 'unknown'
+export type DebugConfidence = 'exact' | 'inferred' | 'estimated'
+
+export interface GenerationDebugPromptUnit {
+  index: number
+  message_index: number
+  path: string
+  role?: string
+  kind: string
+  content_preview?: string
+  estimated_tokens: number
+  cumulative_start: number
+  cumulative_end: number
+  cache_overlap_tokens: number
+  cache_status: CacheStatus
+  token_source: string
+  cache_source: string
+  confidence: DebugConfidence
+}
+
+export interface GenerationDebugTokenAccounting {
+  prompt_tokens: number
+  cached_tokens: number
+  cache_write_tokens: number
+  completion_tokens: number
+  source: string
+  confidence: DebugConfidence
+  cache_write_source?: string
+  cache_write_confidence?: DebugConfidence
+}
+
+export interface GenerationDebugCacheBoundary {
+  cached_tokens: number
+  break_unit_index: number
+  break_unit_path?: string
+  break_unit_role?: string
+  break_offset_tokens: number
+  source: string
+  confidence: DebugConfidence
+}
+
 export interface PromptDebugData {
   messages?: GenerationDebugMessage[]
   upstream_messages?: GenerationDebugMessage[]
+  units?: GenerationDebugPromptUnit[]
+  upstream_units?: GenerationDebugPromptUnit[]
   instructions?: unknown
   upstream_instructions?: unknown
   tools?: unknown
@@ -35,6 +78,8 @@ export interface PromptDebugData {
   upstream_role_counts?: Record<string, number>
   total_estimated_tokens: number
   upstream_total_estimated_tokens: number
+  token_accounting?: GenerationDebugTokenAccounting
+  cache_boundary?: GenerationDebugCacheBoundary
   estimated: boolean
 }
 

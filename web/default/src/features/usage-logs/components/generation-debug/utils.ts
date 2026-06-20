@@ -17,9 +17,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
+
 import type {
+  CacheStatus,
   GenerationDebugMessage,
+  GenerationDebugPromptUnit,
   GenerationDebugRawValue,
+  PromptDebugData,
 } from './types'
 
 export function formatGenerationLatency(milliseconds: number): string {
@@ -46,10 +50,7 @@ export function formatGenerationCost(
   })
 }
 
-function resolveCostValue(
-  providerCost: unknown,
-  chargedCost: number
-): number {
+function resolveCostValue(providerCost: unknown, chargedCost: number): number {
   if (typeof providerCost === 'number') return providerCost
   if (typeof providerCost === 'string') {
     const parsed = Number(providerCost)
@@ -105,6 +106,61 @@ export function roleVariant(
     default:
       return 'neutral'
   }
+}
+
+export function cacheStatusVariant(
+  status: CacheStatus | string | undefined
+): 'green' | 'amber' | 'neutral' | 'blue' | 'grey' | 'orange' {
+  switch (status) {
+    case 'hit':
+      return 'green'
+    case 'partial':
+      return 'amber'
+    case 'miss':
+      return 'neutral'
+    case 'write':
+      return 'blue'
+    default:
+      return 'grey'
+  }
+}
+
+export function cacheStatusLabel(
+  status: CacheStatus | string | undefined
+): string {
+  if (status === 'hit') return 'hit'
+  if (status === 'partial') return 'partial'
+  if (status === 'miss') return 'miss'
+  if (status === 'write') return 'write'
+  return 'unknown'
+}
+
+export function normalizedPromptUnits(
+  prompt: PromptDebugData | undefined
+): GenerationDebugPromptUnit[] {
+  if (prompt?.units && prompt.units.length > 0) return prompt.units
+  let cumulative = 0
+  return (prompt?.messages ?? []).map((message) => {
+    const start = cumulative
+    const estimatedTokens = message.estimated_tokens ?? 0
+    cumulative += estimatedTokens
+    return {
+      index: message.index,
+      message_index: message.index,
+      path: `messages[${message.index}].content`,
+      role: message.role,
+      kind: 'text',
+      content_preview: message.content,
+      estimated_tokens: estimatedTokens,
+      cumulative_start: start,
+      cumulative_end: cumulative,
+      cache_overlap_tokens: message.cached ? estimatedTokens : 0,
+      cache_status: message.cached ? 'hit' : 'unknown',
+      token_source: 'local_estimate',
+      cache_source: message.cached ? 'legacy_message_flag' : 'legacy_message',
+      confidence: message.cached ? 'inferred' : 'estimated',
+    }
+  })
 }
 
 export function rawValueContent(

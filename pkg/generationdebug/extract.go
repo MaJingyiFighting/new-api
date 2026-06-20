@@ -52,15 +52,20 @@ func ExtractPromptFromRequest(data []byte) PromptDebug {
 	if result.Tools == nil {
 		result.Tools = root["functions"]
 	}
+	result.Units = appendRootUnits(result.Units, root)
 
 	if messages, ok := root["messages"].([]any); ok {
 		result.Messages = extractMessages(messages)
+		result.Units = appendMessageUnits(result.Units, "messages", messages)
 	} else if inputs, ok := root["input"].([]any); ok {
 		result.Messages = extractMessages(inputs)
+		result.Units = appendMessageUnits(result.Units, "input", inputs)
 	} else if input, ok := root["input"].(string); ok {
 		result.Messages = []PromptMessage{newPromptMessage("user", input, false, 0)}
+		result.Units = appendTextUnit(result.Units, "input", "user", "text", input, 0)
 	} else if prompt, ok := root["prompt"].(string); ok {
 		result.Messages = []PromptMessage{newPromptMessage("user", prompt, false, 0)}
+		result.Units = appendTextUnit(result.Units, "prompt", "user", "text", prompt, 0)
 	}
 	for _, message := range result.Messages {
 		result.RoleCounts[message.Role]++
@@ -72,7 +77,44 @@ func ExtractPromptFromRequest(data []byte) PromptDebug {
 	if result.Tools != nil {
 		result.TotalEstimatedTokens += estimateTokens(contentText(result.Tools))
 	}
+	result.Units = finalizePromptUnits(result.Units)
+	if len(result.Units) > 0 {
+		result.TotalEstimatedTokens = result.Units[len(result.Units)-1].CumulativeEnd
+	}
 	return result
+}
+
+func ApplyPromptAccounting(prompt *PromptDebug, usage *dto.Usage, cache CacheStats, cacheWriteSource, cacheWriteConfidence string) {
+	if prompt == nil {
+		return
+	}
+	source := "local_estimate"
+	confidence := "estimated"
+	promptTokens := prompt.TotalEstimatedTokens
+	completionTokens := 0
+	if usage != nil {
+		source = "provider_usage"
+		confidence = "exact"
+		promptTokens = usage.PromptTokens
+		completionTokens = usage.CompletionTokens
+	}
+	if cacheWriteSource == "" {
+		cacheWriteSource = source
+	}
+	if cacheWriteConfidence == "" {
+		cacheWriteConfidence = confidence
+	}
+	prompt.TokenAccounting = &PromptTokenAccounting{
+		PromptTokens:         promptTokens,
+		CachedTokens:         cache.CachedTokens,
+		CacheWriteTokens:     cache.CacheWriteTokens,
+		CompletionTokens:     completionTokens,
+		Source:               source,
+		Confidence:           confidence,
+		CacheWriteSource:     cacheWriteSource,
+		CacheWriteConfidence: cacheWriteConfidence,
+	}
+	applyCacheBoundary(prompt, cache.CachedTokens)
 }
 
 func ExtractOutputFromRawResponse(data []byte) ExtractedOutput {
@@ -184,6 +226,165 @@ func extractMessages(values []any) []PromptMessage {
 	return messages
 }
 
+func appendRootUnits(units []PromptUnit, root map[string]any) []PromptUnit {
+	for _, key := range []string{"instructions", "instruction", "system", "developer"} {
+		if value, ok := root[key]; ok && value != nil {
+			units = appendValueUnit(units, key, key, "text", value, -1)
+		}
+	}
+	for _, key := range []string{"tools", "functions"} {
+		if value, ok := root[key]; ok && value != nil {
+			units = appendValueUnit(units, key, "", "tool_schema", value, -1)
+		}
+	}
+	if value, ok := root["tool_choice"]; ok && value != nil {
+		units = appendValueUnit(units, "tool_choice", "", "tool_choice", value, -1)
+	}
+	if value, ok := root["response_format"]; ok && value != nil {
+		units = appendValueUnit(units, "response_format", "", "response_format", value, -1)
+	}
+	return units
+}
+
+func appendMessageUnits(units []PromptUnit, basePath string, values []any) []PromptUnit {
+	for messageIndex, value := range values {
+		message, ok := value.(map[string]any)
+		if !ok {
+			units = appendValueUnit(units, fmt.Sprintf("%s[%d]", basePath, messageIndex), "user", "text", value, messageIndex)
+			continue
+		}
+		role := stringValue(message["role"])
+		if role == "" {
+			role = "user"
+		}
+		if content, ok := message["content"]; ok {
+			units = appendContentUnits(units, fmt.Sprintf("%s[%d].content", basePath, messageIndex), role, content, messageIndex)
+			continue
+		}
+		if text, ok := message["text"]; ok {
+			units = appendContentUnits(units, fmt.Sprintf("%s[%d].text", basePath, messageIndex), role, text, messageIndex)
+			continue
+		}
+		units = appendValueUnit(units, fmt.Sprintf("%s[%d]", basePath, messageIndex), role, "metadata", message, messageIndex)
+	}
+	return units
+}
+
+func appendContentUnits(units []PromptUnit, path, role string, value any, messageIndex int) []PromptUnit {
+	switch typed := value.(type) {
+	case string:
+		return appendTextUnit(units, path, role, "text", typed, messageIndex)
+	case []any:
+		for partIndex, part := range typed {
+			partPath := fmt.Sprintf("%s[%d]", path, partIndex)
+			partKind := "text"
+			partText := contentText(part)
+			if partMap, ok := part.(map[string]any); ok {
+				partType := stringValue(partMap["type"])
+				if partType != "" {
+					partKind = partType
+				}
+				for _, key := range []string{"text", "input_text", "content"} {
+					if text := contentText(partMap[key]); text != "" {
+						partText = text
+						partPath = fmt.Sprintf("%s.%s", partPath, key)
+						break
+					}
+				}
+			}
+			units = appendTextUnit(units, partPath, role, partKind, partText, messageIndex)
+		}
+		return units
+	default:
+		return appendValueUnit(units, path, role, "metadata", value, messageIndex)
+	}
+}
+
+func appendValueUnit(units []PromptUnit, path, role, kind string, value any, messageIndex int) []PromptUnit {
+	return appendTextUnit(units, path, role, kind, contentText(value), messageIndex)
+}
+
+func appendTextUnit(units []PromptUnit, path, role, kind, content string, messageIndex int) []PromptUnit {
+	content = sanitizeString(content)
+	if strings.TrimSpace(content) == "" {
+		return units
+	}
+	return append(units, PromptUnit{
+		Index:           len(units),
+		MessageIndex:    messageIndex,
+		Path:            path,
+		Role:            role,
+		Kind:            kind,
+		ContentPreview:  truncatePreview(content, 240),
+		EstimatedTokens: estimateTokens(content),
+		TokenSource:     "local_estimate",
+		CacheSource:     "cache_boundary_inference",
+		Confidence:      "estimated",
+	})
+}
+
+func finalizePromptUnits(units []PromptUnit) []PromptUnit {
+	total := 0
+	for index := range units {
+		units[index].Index = index
+		units[index].CumulativeStart = total
+		total += units[index].EstimatedTokens
+		units[index].CumulativeEnd = total
+		if units[index].CacheStatus == "" {
+			units[index].CacheStatus = "unknown"
+		}
+	}
+	return units
+}
+
+func applyCacheBoundary(prompt *PromptDebug, cachedTokens int) {
+	if cachedTokens < 0 {
+		cachedTokens = 0
+	}
+	breakIndex := -1
+	breakPath := ""
+	breakRole := ""
+	breakOffset := 0
+	units := prompt.Units
+	for index := range units {
+		unit := &units[index]
+		overlap := min(max(cachedTokens-unit.CumulativeStart, 0), unit.EstimatedTokens)
+		unit.CacheOverlapTokens = overlap
+		unit.CacheSource = "cache_boundary_inference"
+		if overlap <= 0 {
+			unit.CacheStatus = "miss"
+		} else if overlap >= unit.EstimatedTokens {
+			unit.CacheStatus = "hit"
+		} else {
+			unit.CacheStatus = "partial"
+		}
+		unit.Confidence = "inferred"
+		if breakIndex == -1 && unit.EstimatedTokens > 0 && unit.CumulativeEnd > cachedTokens {
+			breakIndex = unit.Index
+			breakPath = unit.Path
+			breakRole = unit.Role
+			breakOffset = max(cachedTokens-unit.CumulativeStart, 0)
+		}
+	}
+	prompt.Units = units
+	if breakIndex == -1 && len(units) > 0 {
+		last := units[len(units)-1]
+		breakIndex = last.Index
+		breakPath = last.Path
+		breakRole = last.Role
+		breakOffset = last.EstimatedTokens
+	}
+	prompt.CacheBoundary = &CacheBoundary{
+		CachedTokens:      cachedTokens,
+		BreakUnitIndex:    breakIndex,
+		BreakUnitPath:     breakPath,
+		BreakUnitRole:     breakRole,
+		BreakOffsetTokens: breakOffset,
+		Source:            "cache_boundary_inference",
+		Confidence:        "inferred",
+	}
+}
+
 func newPromptMessage(role, content string, cached bool, index int) PromptMessage {
 	return PromptMessage{
 		Role:            role,
@@ -282,6 +483,14 @@ func estimateTokens(text string) int {
 		return 0
 	}
 	return int(math.Ceil(float64(utf8.RuneCountInString(text)) / 4))
+}
+
+func truncatePreview(text string, maxRunes int) string {
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return string(runes[:maxRunes]) + "..."
 }
 
 func stringValue(value any) string {

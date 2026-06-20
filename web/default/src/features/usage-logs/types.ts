@@ -1,3 +1,7 @@
+import type {
+  GenerationDebugRaw,
+  GenerationDebugSummary,
+} from './components/generation-debug/types'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -20,10 +24,6 @@ For commercial licensing, please contact support@quantumnous.com
  * Type definitions for usage logs
  */
 import type { UsageLog } from './data/schema'
-import type {
-  GenerationDebugRaw,
-  GenerationDebugSummary,
-} from './components/generation-debug/types'
 
 // ============================================================================
 // Log Category Types

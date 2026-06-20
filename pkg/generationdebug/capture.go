@@ -126,8 +126,12 @@ func MergeContextIntoLogOther(c *gin.Context, other map[string]interface{}, usag
 	output.Truncated = output.Truncated || responseTruncated
 
 	cache := BuildCacheStatsFromUsage(usage)
+	cacheWriteSource := "provider_usage"
+	cacheWriteConfidence := "exact"
 	if meta.CacheWriteTokensOverride > cache.CacheWriteTokens {
 		cache.CacheWriteTokens = meta.CacheWriteTokensOverride
+		cacheWriteSource = "billing_inference"
+		cacheWriteConfidence = "inferred"
 	}
 	latency := int64(0)
 	if !state.upstreamStart.IsZero() {
@@ -167,6 +171,7 @@ func MergeContextIntoLogOther(c *gin.Context, other map[string]interface{}, usag
 	}
 	if state.config.UserVisible {
 		prompt := combinePrompts(state.inboundPrompt, state.upstreamPrompt)
+		ApplyPromptAccounting(&prompt, usage, cache, cacheWriteSource, cacheWriteConfidence)
 		summary.Prompt = &prompt
 		completion := &CompletionDebug{
 			FinishReason: output.FinishReason,
@@ -273,6 +278,7 @@ func (s *captureState) responseSnapshot() ([]byte, bool, int) {
 
 func combinePrompts(inbound, upstream PromptDebug) PromptDebug {
 	inbound.UpstreamMessages = upstream.Messages
+	inbound.UpstreamUnits = upstream.Units
 	inbound.UpstreamInstructions = upstream.Instructions
 	inbound.UpstreamTools = upstream.Tools
 	inbound.UpstreamRoleCounts = upstream.RoleCounts

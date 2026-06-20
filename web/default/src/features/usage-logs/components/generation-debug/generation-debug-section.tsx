@@ -20,20 +20,20 @@ import {
   CircleDollarSignIcon,
   Clock3Icon,
   DatabaseIcon,
+  FingerprintIcon,
+  HashIcon,
+  LayersIcon,
   RefreshCcwIcon,
   RouteIcon,
   ZapIcon,
 } from 'lucide-react'
 import type { ComponentType } from 'react'
 import { useTranslation } from 'react-i18next'
-import { cn } from '@/lib/utils'
+
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from '@/components/ui/tabs'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { cn } from '@/lib/utils'
+
 import type { UsageLog } from '../../data/schema'
 import type { LogOtherData } from '../../types'
 import { CompletionDebugPanel } from './completion-debug-panel'
@@ -57,6 +57,7 @@ interface MetricCardProps {
   value: string
   icon: ComponentType<{ className?: string; 'aria-hidden'?: boolean }>
   muted?: boolean
+  mono?: boolean
 }
 
 function MetricCard(props: MetricCardProps) {
@@ -64,17 +65,15 @@ function MetricCard(props: MetricCardProps) {
   return (
     <Card size='sm' className='gap-1 py-2.5'>
       <CardHeader className='flex-row items-center gap-1.5 px-3'>
-        <Icon
-          className='text-muted-foreground size-3.5'
-          aria-hidden
-        />
+        <Icon className='text-muted-foreground size-3.5' aria-hidden />
         <CardTitle className='text-muted-foreground text-[11px] font-medium'>
           {props.label}
         </CardTitle>
       </CardHeader>
       <CardContent
         className={cn(
-          'px-3 font-mono text-sm font-semibold',
+          'min-w-0 break-words px-3 text-sm font-semibold',
+          props.mono && 'font-mono text-xs',
           props.muted && 'text-muted-foreground'
         )}
       >
@@ -94,12 +93,19 @@ export function GenerationDebugSection(props: GenerationDebugSectionProps) {
   if (!summary) return null
 
   const rawResponse = raw?.raw_stream ?? raw?.raw_response
+  const rawRequest = raw?.upstream_request ?? raw?.inbound_request
   const retryChain = props.other?.admin_info?.use_channel ?? []
   const fallbackCount = Math.max(0, retryChain.length - 1)
   const cachedTokens = summary.cache?.cached_tokens ?? 0
+  let providerName = '--'
+  if (props.log.channel_name) {
+    providerName = `${props.log.channel_name} #${props.log.channel}`
+  } else if (props.log.channel > 0) {
+    providerName = `#${props.log.channel}`
+  }
 
   return (
-    <div className='flex min-w-0 flex-col gap-2.5'>
+    <div className='flex min-w-0 flex-col gap-3'>
       <div className='flex items-center justify-between gap-2'>
         <span className='text-xs font-semibold'>{t('Generation Debug')}</span>
         <span className='text-muted-foreground text-[11px]'>
@@ -107,7 +113,50 @@ export function GenerationDebugSection(props: GenerationDebugSectionProps) {
         </span>
       </div>
 
-      <div className='grid min-w-0 grid-cols-2 gap-2'>
+      <div className='grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5'>
+        <MetricCard
+          label={t('Model')}
+          value={
+            props.other?.upstream_model_name || props.log.model_name || '--'
+          }
+          icon={LayersIcon}
+          mono
+        />
+        <MetricCard
+          label={t('Provider')}
+          value={providerName}
+          icon={HashIcon}
+          mono
+          muted={providerName === '--'}
+        />
+        <MetricCard
+          label={t('Request ID')}
+          value={summary.request_id || props.log.request_id || '--'}
+          icon={FingerprintIcon}
+          mono
+          muted={!summary.request_id && !props.log.request_id}
+        />
+        <MetricCard
+          label={t('Generation ID')}
+          value={summary.generation_id || '--'}
+          icon={FingerprintIcon}
+          mono
+          muted={!summary.generation_id}
+        />
+        <MetricCard
+          label={t('Finish Reason')}
+          value={
+            summary.finish_reason || summary.completion?.finish_reason || '--'
+          }
+          icon={RouteIcon}
+          mono
+          muted={!summary.finish_reason && !summary.completion?.finish_reason}
+        />
+        <MetricCard
+          label={t('Streaming')}
+          value={summary.streaming ? t('Yes') : t('No')}
+          icon={ZapIcon}
+        />
         <MetricCard
           label={t('Provider latency')}
           value={formatGenerationLatency(summary.provider_latency_ms)}
@@ -132,6 +181,7 @@ export function GenerationDebugSection(props: GenerationDebugSectionProps) {
           label={t('Tokens')}
           value={`${formatGenerationTokens(summary.prompt_tokens)} → ${formatGenerationTokens(summary.completion_tokens)}`}
           icon={RouteIcon}
+          mono
         />
         <MetricCard
           label={t('Cached')}
@@ -140,28 +190,21 @@ export function GenerationDebugSection(props: GenerationDebugSectionProps) {
         />
         <MetricCard
           label={t('Fallbacks')}
-          value={
-            retryChain.length > 0 ? fallbackCount.toLocaleString() : '--'
-          }
+          value={retryChain.length > 0 ? fallbackCount.toLocaleString() : '--'}
           icon={RefreshCcwIcon}
           muted={retryChain.length === 0}
         />
       </div>
 
-      <Tabs defaultValue='prompt' className='min-w-0'>
+      <PromptDebugPanel prompt={summary.prompt} rawRequest={rawRequest} />
+
+      <Tabs defaultValue='completion' className='min-w-0'>
         <TabsList variant='line' className='w-full justify-start'>
-          <TabsTrigger value='prompt'>{t('Prompt')}</TabsTrigger>
           <TabsTrigger value='completion'>{t('Completion')}</TabsTrigger>
           {props.isAdmin && raw && (
             <TabsTrigger value='raw'>{t('Raw')}</TabsTrigger>
           )}
         </TabsList>
-        <TabsContent value='prompt' className='min-w-0 pt-1'>
-          <PromptDebugPanel
-            prompt={summary.prompt}
-            rawRequest={raw?.inbound_request}
-          />
-        </TabsContent>
         <TabsContent value='completion' className='min-w-0 pt-1'>
           <CompletionDebugPanel
             completion={summary.completion}

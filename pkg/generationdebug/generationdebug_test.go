@@ -71,6 +71,110 @@ func TestBuildCacheStatsFromUsageUsesMaximumAndSplitWrites(t *testing.T) {
 	assert.InDelta(t, 0.4, stats.CacheHitRate, 0.0001)
 }
 
+func TestPromptCacheBoundaryCachedZeroMarksFirstUnitMiss(t *testing.T) {
+	prompt := ExtractPromptFromRequest([]byte(`{
+		"messages":[{"role":"user","content":"abcdefghijklmnop"}]
+	}`))
+
+	ApplyPromptAccounting(&prompt, &dto.Usage{
+		PromptTokens:     4,
+		CompletionTokens: 1,
+		PromptTokensDetails: dto.InputTokenDetails{
+			CachedCreationTokens: 9,
+		},
+	}, BuildCacheStatsFromUsage(&dto.Usage{
+		PromptTokens: 4,
+		PromptTokensDetails: dto.InputTokenDetails{
+			CachedCreationTokens: 9,
+		},
+	}), "provider_usage", "exact")
+
+	require.Len(t, prompt.Units, 1)
+	require.NotNil(t, prompt.TokenAccounting)
+	require.NotNil(t, prompt.CacheBoundary)
+	assert.Equal(t, 0, prompt.CacheBoundary.CachedTokens)
+	assert.Equal(t, 0, prompt.CacheBoundary.BreakUnitIndex)
+	assert.Equal(t, "messages[0].content", prompt.CacheBoundary.BreakUnitPath)
+	assert.Equal(t, 0, prompt.CacheBoundary.BreakOffsetTokens)
+	assert.Equal(t, "miss", prompt.Units[0].CacheStatus)
+	assert.Equal(t, 0, prompt.Units[0].CacheOverlapTokens)
+	assert.Equal(t, 9, prompt.TokenAccounting.CacheWriteTokens)
+	assert.Equal(t, "provider_usage", prompt.TokenAccounting.Source)
+	assert.Equal(t, "exact", prompt.TokenAccounting.Confidence)
+	assert.Equal(t, "local_estimate", prompt.Units[0].TokenSource)
+	assert.Equal(t, "cache_boundary_inference", prompt.Units[0].CacheSource)
+	assert.Equal(t, "inferred", prompt.Units[0].Confidence)
+}
+
+func TestPromptCacheBoundaryPartialInsideMessage(t *testing.T) {
+	prompt := ExtractPromptFromRequest([]byte(`{
+		"messages":[
+			{"role":"system","content":"abcdefghijklmnop"},
+			{"role":"user","content":"abcdefghijkl"}
+		]
+	}`))
+	usage := &dto.Usage{
+		PromptTokens:     7,
+		CompletionTokens: 1,
+		PromptTokensDetails: dto.InputTokenDetails{
+			CachedTokens: 6,
+		},
+	}
+
+	ApplyPromptAccounting(&prompt, usage, BuildCacheStatsFromUsage(usage), "provider_usage", "exact")
+
+	require.Len(t, prompt.Units, 2)
+	assert.Equal(t, "hit", prompt.Units[0].CacheStatus)
+	assert.Equal(t, 4, prompt.Units[0].CacheOverlapTokens)
+	assert.Equal(t, "partial", prompt.Units[1].CacheStatus)
+	assert.Equal(t, 2, prompt.Units[1].CacheOverlapTokens)
+	assert.Equal(t, 1, prompt.CacheBoundary.BreakUnitIndex)
+	assert.Equal(t, "messages[1].content", prompt.CacheBoundary.BreakUnitPath)
+	assert.Equal(t, 2, prompt.CacheBoundary.BreakOffsetTokens)
+}
+
+func TestPromptCacheBoundaryHitMissAcrossMessages(t *testing.T) {
+	prompt := ExtractPromptFromRequest([]byte(`{
+		"messages":[
+			{"role":"system","content":"abcdefghijklmnop"},
+			{"role":"user","content":"abcdefghijkl"},
+			{"role":"assistant","content":"abcdefgh"}
+		]
+	}`))
+	usage := &dto.Usage{
+		PromptTokens: 9,
+		PromptTokensDetails: dto.InputTokenDetails{
+			CachedTokens: 7,
+		},
+	}
+
+	ApplyPromptAccounting(&prompt, usage, BuildCacheStatsFromUsage(usage), "provider_usage", "exact")
+
+	require.Len(t, prompt.Units, 3)
+	assert.Equal(t, "hit", prompt.Units[0].CacheStatus)
+	assert.Equal(t, "hit", prompt.Units[1].CacheStatus)
+	assert.Equal(t, "miss", prompt.Units[2].CacheStatus)
+	assert.Equal(t, 2, prompt.CacheBoundary.BreakUnitIndex)
+	assert.Equal(t, 0, prompt.CacheBoundary.BreakOffsetTokens)
+}
+
+func TestPromptCacheWriteTokensAreNotCacheHitsAndOverrideIsInferred(t *testing.T) {
+	prompt := ExtractPromptFromRequest([]byte(`{
+		"messages":[{"role":"user","content":"abcdefghijklmnop"}]
+	}`))
+	cache := CacheStats{CacheWriteTokens: 12}
+
+	ApplyPromptAccounting(&prompt, &dto.Usage{PromptTokens: 4}, cache, "billing_inference", "inferred")
+
+	require.Len(t, prompt.Units, 1)
+	assert.Equal(t, "miss", prompt.Units[0].CacheStatus)
+	assert.Equal(t, 0, prompt.Units[0].CacheOverlapTokens)
+	require.NotNil(t, prompt.TokenAccounting)
+	assert.Equal(t, 12, prompt.TokenAccounting.CacheWriteTokens)
+	assert.Equal(t, "billing_inference", prompt.TokenAccounting.CacheWriteSource)
+	assert.Equal(t, "inferred", prompt.TokenAccounting.CacheWriteConfidence)
+}
+
 func TestExtractOutputFromSSE(t *testing.T) {
 	stream := strings.Join([]string{
 		`data: {"id":"gen-1","choices":[{"delta":{"content":"Hello ","reasoning_content":"think "},"finish_reason":null}]}`,
