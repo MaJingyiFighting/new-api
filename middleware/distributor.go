@@ -165,6 +165,12 @@ func Distribute() func(c *gin.Context) {
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
+			// 成功响应 → 清除此 key 的退避状态
+			if channel.ChannelInfo.IsMultiKey {
+				if keyIdx := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex); keyIdx >= 0 {
+					service.HandleUpstreamSuccess(channel, keyIdx)
+				}
+			}
 		}
 	}
 }

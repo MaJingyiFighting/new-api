@@ -12,6 +12,8 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"time"
+
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/types"
 
@@ -67,6 +69,46 @@ type ChannelInfo struct {
 	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
 	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
 	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
+
+	// ── 限流/退避时间戳（per-key, Unix 时间戳, 0=无限制） ──
+	// 429 Too Many Requests: 在此时间前跳过此 key
+	MultiKeyRateLimitUntil map[int]int64 `json:"multi_key_rate_limit_until,omitempty"`
+	// 529 Overloaded / 503 Service Unavailable: 在此时间前跳过此 key
+	MultiKeyOverloadUntil map[int]int64 `json:"multi_key_overload_until,omitempty"`
+	// 临时不可调度（401 OAuth 冷却等）：在此时间前跳过此 key
+	MultiKeyTempUnschedulableUntil map[int]int64 `json:"multi_key_temp_unschedulable_until,omitempty"`
+	// 401/403 连续失败计数（Redis 同步，JSON 仅用于展示）
+	MultiKeyAuthFailCount map[int]int `json:"multi_key_auth_fail_count,omitempty"`
+}
+
+// isKeySchedulable 检查 key 是否可调度（不处于限流/过载/临时禁用状态）。
+// 移植自 sub2api account.IsSchedulable() 的时间自动过期语义。
+func isKeySchedulable(info *ChannelInfo, keyIdx int, now time.Time) bool {
+	if info.MultiKeyRateLimitUntil != nil {
+		if until, ok := info.MultiKeyRateLimitUntil[keyIdx]; ok && until > 0 && now.Unix() < until {
+			return false
+		}
+	}
+	if info.MultiKeyOverloadUntil != nil {
+		if until, ok := info.MultiKeyOverloadUntil[keyIdx]; ok && until > 0 && now.Unix() < until {
+			return false
+		}
+	}
+	if info.MultiKeyTempUnschedulableUntil != nil {
+		if until, ok := info.MultiKeyTempUnschedulableUntil[keyIdx]; ok && until > 0 && now.Unix() < until {
+			return false
+		}
+	}
+	return true
+}
+
+// IsKeyRateLimited 检查 key 是否处于 429 限流中。
+func IsKeyRateLimited(info *ChannelInfo, keyIdx int) bool {
+	if info == nil || info.MultiKeyRateLimitUntil == nil {
+		return false
+	}
+	until, ok := info.MultiKeyRateLimitUntil[keyIdx]
+	return ok && until > 0 && time.Now().Unix() < until
 }
 
 type ChannelSortOptions struct {
@@ -225,16 +267,22 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		return common.ChannelStatusEnabled
 	}
 
-	// Collect indexes of enabled keys
+	now := time.Now()
+	info := &channel.ChannelInfo
+
+	// Collect indexes of enabled + schedulable keys
 	enabledIdx := make([]int, 0, len(keys))
 	for i := range keys {
-		if getStatus(i) == common.ChannelStatusEnabled {
-			enabledIdx = append(enabledIdx, i)
+		if getStatus(i) != common.ChannelStatusEnabled {
+			continue
 		}
+		if !isKeySchedulable(info, i, now) {
+			continue
+		}
+		enabledIdx = append(enabledIdx, i)
 	}
-	// If no specific status list or none enabled, return an explicit error so caller can
-	// properly handle a channel with no available keys (e.g. mark channel disabled).
-	// Returning the first key here caused requests to keep using an already-disabled key.
+	// If no schedulable keys, try rate-limited keys (lazy recovery is not possible;
+	// return a channel:* error so caller can fallback to next channel or fail).
 	if len(enabledIdx) == 0 {
 		return "", 0, types.NewError(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey)
 	}

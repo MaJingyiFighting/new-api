@@ -86,6 +86,14 @@ func ClaudeErrorWrapperLocal(err error, code string, statusCode int) *dto.Claude
 func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFail bool) (newApiErr *types.NewAPIError) {
 	newApiErr = types.InitOpenAIError(types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
 
+	// 捕获 Retry-After header，供 processChannelError 读取
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		newApiErr.UpstreamRetryAfter = ra
+	} else if resetAfter := resp.Header.Get("X-RateLimit-Reset"); resetAfter != "" {
+		// OpenAI / Anthropic 可能使用自定义 header
+		newApiErr.UpstreamRetryAfter = resetAfter
+	}
+
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return

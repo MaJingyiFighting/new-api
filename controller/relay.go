@@ -356,9 +356,11 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
-	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
-	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
-	if service.ShouldDisableChannel(err) && channelError.AutoBan {
+
+	if channelError.IsMultiKey {
+		keyIdx := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+		processMultiKeyBackoff(c, channelError, err, keyIdx)
+	} else if service.ShouldDisableChannel(err) && channelError.AutoBan {
 		gopool.Go(func() {
 			service.DisableChannel(channelError, err.ErrorWithStatusCode())
 		})
@@ -399,6 +401,63 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		model.RecordErrorLog(c, userId, channelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
 	}
 
+}
+
+// processMultiKeyBackoff 根据上游错误状态码，对 multi-key 渠道的单个 key 执行退避/禁用。
+// 移植自 sub2api ratelimit_service.HandleUpstreamErrorRaw() 的 429/401/403/529 处理逻辑。
+func processMultiKeyBackoff(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, keyIdx int) {
+	if keyIdx < 0 {
+		return
+	}
+
+	ch, cacheErr := model.CacheGetChannel(channelError.ChannelId)
+	if cacheErr != nil || ch == nil || !ch.ChannelInfo.IsMultiKey {
+		return
+	}
+	// 检查 key index 是否有效
+	if keyIdx >= len(ch.GetKeys()) {
+		return
+	}
+
+	switch err.StatusCode {
+	case http.StatusTooManyRequests: // 429
+		respHeaders := make(http.Header)
+		if ra := err.UpstreamRetryAfter; ra != "" {
+			respHeaders.Set("Retry-After", ra)
+		}
+		service.HandleUpstream429(ch, keyIdx, respHeaders, []byte(err.Error()))
+
+	case 529, http.StatusServiceUnavailable: // 529 / 503
+		respHeaders := make(http.Header)
+		if ra := err.UpstreamRetryAfter; ra != "" {
+			respHeaders.Set("Retry-After", ra)
+		}
+		service.HandleUpstreamOverload(ch, keyIdx, respHeaders)
+
+	case http.StatusUnauthorized: // 401
+		service.HandleUpstreamAuthError(ch, keyIdx, false)
+
+	case http.StatusForbidden: // 403
+		service.HandleUpstream403(ch, keyIdx)
+
+	case http.StatusPaymentRequired: // 402
+		// 余额不足，直接禁用 key
+		if ch.ChannelInfo.MultiKeyStatusList == nil {
+			ch.ChannelInfo.MultiKeyStatusList = make(map[int]int)
+		}
+		ch.ChannelInfo.MultiKeyStatusList[keyIdx] = 3 // auto-disabled
+		_ = ch.SaveChannelInfo()
+	}
+
+	// 全局 429/限流关键词匹配（非 multi-key 或 keyIdx 无效时的兜底）
+	if !ch.ChannelInfo.IsMultiKey && err.StatusCode == http.StatusTooManyRequests && channelError.AutoBan {
+		respHeaders := make(http.Header)
+		if ra := err.UpstreamRetryAfter; ra != "" {
+			respHeaders.Set("Retry-After", ra)
+		}
+		// 非 multi-key 渠道的 429 使用默认 5s 冷却
+		service.HandleUpstream429(ch, 0, respHeaders, []byte(err.Error()))
+	}
 }
 
 func RelayMidjourney(c *gin.Context) {
