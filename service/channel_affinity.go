@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -27,6 +29,7 @@ const (
 	ginKeyChannelAffinitySkipRetry  = "channel_affinity_skip_retry_on_failure"
 
 	channelAffinityCacheNamespace           = "new-api:channel_affinity:v1"
+	channelAffinityCacheV2Namespace         = "new-api:channel_affinity:v2"
 	channelAffinityUsageCacheStatsNamespace = "new-api:channel_affinity_usage_cache_stats:v1"
 )
 
@@ -54,6 +57,16 @@ type channelAffinityMeta struct {
 	UsingGroup     string
 	ModelName      string
 	RequestPath    string
+}
+
+// ChannelAffinityTarget 表示亲和缓存目标，将同一个 prompt_cache_key/用户标识
+// 固定到 channel_id + key_index + key_fingerprint 级别。
+// Version=2 表示包含 key 信息的 v2 格式；单 Key channel 的 KeyIndex = -1。
+type ChannelAffinityTarget struct {
+	Version        int    `json:"version"`
+	ChannelID      int    `json:"channel_id"`
+	KeyIndex       int    `json:"key_index"`
+	KeyFingerprint string `json:"key_fingerprint"`
 }
 
 type ChannelAffinityStatsContext struct {
@@ -106,6 +119,182 @@ func getChannelAffinityCache() *cachex.HybridCache[int] {
 		})
 	})
 	return channelAffinityCache
+}
+
+// ── v2 affinity cache (key-level) ──
+
+var (
+	channelAffinityCacheV2Once sync.Once
+	channelAffinityCacheV2     *cachex.HybridCache[ChannelAffinityTarget]
+)
+
+func getChannelAffinityV2Cache() *cachex.HybridCache[ChannelAffinityTarget] {
+	channelAffinityCacheV2Once.Do(func() {
+		setting := operation_setting.GetChannelAffinitySetting()
+		capacity := setting.MaxEntries
+		if capacity <= 0 {
+			capacity = 100_000
+		}
+		defaultTTLSeconds := setting.DefaultTTLSeconds
+		if defaultTTLSeconds <= 0 {
+			defaultTTLSeconds = 3600
+		}
+
+		channelAffinityCacheV2 = cachex.NewHybridCache[ChannelAffinityTarget](cachex.HybridCacheConfig[ChannelAffinityTarget]{
+			Namespace: cachex.Namespace(channelAffinityCacheV2Namespace),
+			Redis:     common.RDB,
+			RedisEnabled: func() bool {
+				return common.RedisEnabled && common.RDB != nil
+			},
+			RedisCodec: cachex.JSONCodec[ChannelAffinityTarget]{},
+			Memory: func() *hot.HotCache[string, ChannelAffinityTarget] {
+				return hot.NewHotCache[string, ChannelAffinityTarget](hot.LRU, capacity).
+					WithTTL(time.Duration(defaultTTLSeconds) * time.Second).
+					WithJanitor().
+					Build()
+			},
+		})
+	})
+	return channelAffinityCacheV2
+}
+
+// KeyFingerprintForKey 计算 key 的指纹，使用 SHA1(key) 前 12 位。
+// 用于校验 key 顺序变化时 affinity cache 是否仍然有效。
+func KeyFingerprintForKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	hex := common.Sha1([]byte(key))
+	if len(hex) >= 12 {
+		return hex[:12]
+	}
+	return hex
+}
+
+// RecordChannelAffinityV2 记录 v2 affinity target（含 key_index 和 key_fingerprint）。
+// 在成功请求后调用，记录最终成功的 channel/key。
+func RecordChannelAffinityV2(c *gin.Context, target ChannelAffinityTarget) {
+	if target.ChannelID <= 0 {
+		return
+	}
+	setting := operation_setting.GetChannelAffinitySetting()
+	if setting == nil || !setting.Enabled {
+		return
+	}
+	cacheKey, ttlSeconds, ok := getChannelAffinityContext(c)
+	if !ok {
+		return
+	}
+	if ttlSeconds <= 0 {
+		ttlSeconds = setting.DefaultTTLSeconds
+	}
+	if ttlSeconds <= 0 {
+		ttlSeconds = 3600
+	}
+	target.Version = 2
+	cache := getChannelAffinityV2Cache()
+	if err := cache.SetWithTTL(cacheKey, target, time.Duration(ttlSeconds)*time.Second); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity v2 cache set failed: key=%s, err=%v", cacheKey, err))
+	}
+}
+
+// GetPreferredChannelTargetByAffinity 返回 v2 affinity target（channel + key 级别）。
+// 如果命中且 key 校验通过则返回 target + true；否则清除缓存并返回零值 + false。
+func GetPreferredChannelTargetByAffinity(c *gin.Context, modelName string, usingGroup string) (ChannelAffinityTarget, bool) {
+	setting := operation_setting.GetChannelAffinitySetting()
+	if setting == nil || !setting.Enabled {
+		return ChannelAffinityTarget{}, false
+	}
+
+	// 先用 v1 逻辑构建 cache key（把 meta 写进 context）
+	channelID, found := GetPreferredChannelByAffinity(c, modelName, usingGroup)
+	if !found {
+		return ChannelAffinityTarget{}, false
+	}
+
+	// 从 v2 cache 读取 target
+	cacheKey, _, ok := getChannelAffinityContext(c)
+	if !ok || cacheKey == "" {
+		return ChannelAffinityTarget{}, false
+	}
+
+	cache := getChannelAffinityV2Cache()
+	target, found, err := cache.Get(cacheKey)
+	if err != nil || !found {
+		return ChannelAffinityTarget{}, false
+	}
+
+	// 校验：ChannelID 必须一致
+	if target.ChannelID != channelID {
+		_ = ClearChannelAffinityV2Cache(c)
+		return ChannelAffinityTarget{}, false
+	}
+
+	// 校验：Channel 必须存在且启用
+	ch, chErr := model.CacheGetChannel(target.ChannelID)
+	if chErr != nil || ch == nil || ch.Status != common.ChannelStatusEnabled {
+		_ = ClearChannelAffinityV2Cache(c)
+		return ChannelAffinityTarget{}, false
+	}
+
+	if target.KeyIndex >= 0 {
+		// multi-key channel：校验 key index 和 fingerprint
+		keys := ch.GetKeys()
+		if target.KeyIndex >= len(keys) {
+			_ = ClearChannelAffinityV2Cache(c)
+			return ChannelAffinityTarget{}, false
+		}
+		// 校验 key fingerprint
+		actualFp := KeyFingerprintForKey(keys[target.KeyIndex])
+		if actualFp != target.KeyFingerprint {
+			_ = ClearChannelAffinityV2Cache(c)
+			return ChannelAffinityTarget{}, false
+		}
+		// 校验 key 是否永久启用
+		statusList := ch.ChannelInfo.MultiKeyStatusList
+		if statusList != nil {
+			if status, ok := statusList[target.KeyIndex]; ok && status != common.ChannelStatusEnabled {
+				_ = ClearChannelAffinityV2Cache(c)
+				return ChannelAffinityTarget{}, false
+			}
+		}
+		// 校验 key 是否临时冻结
+		now := time.Now()
+		info := &ch.ChannelInfo
+		if !model.IsKeySchedulable(info, target.KeyIndex, now) {
+			_ = ClearChannelAffinityV2Cache(c)
+			return ChannelAffinityTarget{}, false
+		}
+	}
+
+	// 全部校验通过，把 prefered key index 写到 context
+	c.Set(string(constant.ContextKeyChannelAffinityPreferredKeyIndex), target.KeyIndex)
+	c.Set(string(constant.ContextKeyChannelAffinityPreferredKeyFingerprint), target.KeyFingerprint)
+	c.Set(string(constant.ContextKeyChannelAffinityTarget), target)
+
+	return target, true
+}
+
+func ClearChannelAffinityV2Cache(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	cacheKey, _, ok := getChannelAffinityContext(c)
+	if !ok || cacheKey == "" {
+		return false
+	}
+	cache := getChannelAffinityV2Cache()
+	deleted, err := cache.DeleteMany([]string{cacheKey})
+	if err != nil {
+		common.SysError(fmt.Sprintf("channel affinity v2 cache delete failed: key=%s, err=%v", cacheKey, err))
+		return false
+	}
+	for _, ok := range deleted {
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 func GetChannelAffinityCacheStats() ChannelAffinityCacheStats {

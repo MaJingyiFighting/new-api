@@ -72,4 +72,9 @@ const (
 	// fallback in authHelper (finishAdminAudit) skips its record to avoid
 	// duplicate entries.
 	ContextKeyAuditLogged ContextKey = "audit_logged"
+
+	// Channel affinity v2 — key-level sticky session
+	ContextKeyChannelAffinityPreferredKeyIndex       ContextKey = "channel_affinity_preferred_key_index"
+	ContextKeyChannelAffinityPreferredKeyFingerprint ContextKey = "channel_affinity_preferred_key_fingerprint"
+	ContextKeyChannelAffinityTarget                  ContextKey = "channel_affinity_target"
 )

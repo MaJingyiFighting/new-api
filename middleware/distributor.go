@@ -101,9 +101,9 @@ func Distribute() func(c *gin.Context) {
 					}
 				}
 
-				if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); found {
+				if affinityTarget, found := service.GetPreferredChannelTargetByAffinity(c, modelRequest.Model, usingGroup); found {
 					affinityUsable := false
-					preferred, err := model.CacheGetChannel(preferredChannelID)
+					preferred, err := model.CacheGetChannel(affinityTarget.ChannelID)
 					if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled &&
 						channelSupportsRequestPath(preferred, c.Request.URL.Path) {
 						if usingGroup == "auto" {
@@ -126,8 +126,12 @@ func Distribute() func(c *gin.Context) {
 							service.MarkChannelAffinityUsed(c, usingGroup, preferred.Id)
 						}
 					}
-					if !affinityUsable && !service.ShouldKeepChannelAffinityOnChannelDisabled() {
-						service.ClearCurrentChannelAffinityCache(c)
+					if !affinityUsable {
+						if !service.ShouldKeepChannelAffinityOnChannelDisabled() {
+							service.ClearCurrentChannelAffinityCache(c)
+						}
+						// clear preferred key context so SetupContextForSelectedChannel won't use stale affinity
+						c.Set(string(constant.ContextKeyChannelAffinityPreferredKeyIndex), -1)
 					}
 				}
 
@@ -165,6 +169,19 @@ func Distribute() func(c *gin.Context) {
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
+			// 记录 v2 affinity target（含 key_index 和 key_fingerprint）
+			actualKeyIndex := -1
+			if channel.ChannelInfo.IsMultiKey {
+				actualKeyIndex = common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+			}
+			actualKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+			v2Target := service.ChannelAffinityTarget{
+				Version:        2,
+				ChannelID:      channel.Id,
+				KeyIndex:       actualKeyIndex,
+				KeyFingerprint: service.KeyFingerprintForKey(actualKey),
+			}
+			service.RecordChannelAffinityV2(c, v2Target)
 			// 成功响应 → 清除此 key 的退避状态
 			if channel.ChannelInfo.IsMultiKey {
 				if keyIdx := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex); keyIdx >= 0 {
@@ -471,8 +488,25 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, constant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
 
-	key, index, newAPIError := channel.GetNextEnabledKey()
+	// 检查是否有 preferred key index（来自 key-level affinity）
+	preferredKeyIdx := -1
+	if v, ok := c.Get(string(constant.ContextKeyChannelAffinityPreferredKeyIndex)); ok {
+		if idx, ok := v.(int); ok {
+			preferredKeyIdx = idx
+		}
+	}
+	var preferredKeyIdxPtr *int
+	if preferredKeyIdx >= 0 {
+		preferredKeyIdxPtr = &preferredKeyIdx
+	}
+	key, index, newAPIError := channel.GetNextEnabledKeyWithAffinity(preferredKeyIdxPtr)
 	if newAPIError != nil {
+		// preferred key not available, clear affinity cache
+		if preferredKeyIdx >= 0 {
+			c.Set(string(constant.ContextKeyChannelAffinityPreferredKeyIndex), -1)
+			// clear v2 cache if stale
+			_ = service.ClearChannelAffinityV2Cache(c)
+		}
 		return newAPIError
 	}
 	if channel.ChannelInfo.IsMultiKey {

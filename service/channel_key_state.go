@@ -144,16 +144,154 @@ func setKeyTempUnschedulable(info *model.ChannelInfo, keyIdx int, untilUnix int6
 	info.MultiKeyTempUnschedulableUntil[keyIdx] = untilUnix
 }
 
+func setKeyQuotaReset(info *model.ChannelInfo, keyIdx int, untilUnix int64) {
+	if info.MultiKeyQuotaResetAt == nil {
+		info.MultiKeyQuotaResetAt = make(map[int]int64)
+	}
+	info.MultiKeyQuotaResetAt[keyIdx] = untilUnix
+}
+
+func setKeyTempReason(info *model.ChannelInfo, keyIdx int, reason string) {
+	if info.MultiKeyTempReason == nil {
+		info.MultiKeyTempReason = make(map[int]string)
+	}
+	info.MultiKeyTempReason[keyIdx] = reason
+}
+
 func clearKeyBackoffState(info *model.ChannelInfo, keyIdx int) {
 	delete(info.MultiKeyRateLimitUntil, keyIdx)
 	delete(info.MultiKeyOverloadUntil, keyIdx)
 	delete(info.MultiKeyTempUnschedulableUntil, keyIdx)
+	delete(info.MultiKeyQuotaResetAt, keyIdx)
+	delete(info.MultiKeyTempReason, keyIdx)
 }
 
 func clearKeyAuthFailCount(info *model.ChannelInfo, keyIdx int) {
 	if info.MultiKeyAuthFailCount != nil {
 		delete(info.MultiKeyAuthFailCount, keyIdx)
 	}
+}
+
+// ParseRetryAfterOrResetAt 解析上游响应中的重试等待时间。
+// 解析来源优先级：
+//  1. Retry-After header（秒数或 HTTP-date）
+//  2. response body JSON 字段：retry_after, reset_after, reset_at, rate_limit_reset, quota_reset_at
+//  3. 错误文本中的简单模式：retry after 12s, try again in 60 seconds
+//  4. fallback 默认值
+func ParseRetryAfterOrResetAt(upstreamRetryAfter string, errBody string, errMsg string, now time.Time, fallback time.Duration) time.Time {
+	// 1. Retry-After header
+	if upstreamRetryAfter != "" {
+		if sec, err := strconv.Atoi(upstreamRetryAfter); err == nil && sec > 0 {
+			return now.Add(time.Duration(sec) * time.Second)
+		}
+		if t, err := time.Parse(http.TimeFormat, upstreamRetryAfter); err == nil {
+			return t
+		}
+	}
+	// 2. response body JSON
+	if errBody != "" {
+		sec := extractResetSeconds(errBody)
+		if sec > 0 {
+			return now.Add(time.Duration(sec) * time.Second)
+		}
+		// try additional fields: rate_limit_reset, quota_reset_at
+		lower := strings.ToLower(errBody)
+		additionalFields := []struct {
+			prefix string
+			offset int
+		}{
+			{`"rate_limit_reset":`, 18},
+			{`"quota_reset_at":`, 16},
+			{`"reset_at":`, 10},
+		}
+		for _, f := range additionalFields {
+			if idx := strings.Index(lower, f.prefix); idx >= 0 {
+				end := idx + f.offset
+				remain := strings.TrimSpace(lower[end:])
+				var numStr string
+				for _, c := range remain {
+					if c >= '0' && c <= '9' {
+						numStr += string(c)
+					} else if numStr != "" {
+						break
+					}
+				}
+				if numStr != "" {
+					if sec, err := strconv.ParseInt(numStr, 10, 64); err == nil && sec > 0 {
+						if sec > 3600*24*30 {
+							sec = sec / 1000
+						}
+						return now.Add(time.Duration(sec) * time.Second)
+					}
+				}
+			}
+		}
+	}
+	// 3. error text patterns
+	if errMsg != "" {
+		lower := strings.ToLower(errMsg)
+		if idx := strings.Index(lower, "retry after "); idx >= 0 {
+			remain := lower[idx+len("retry after "):]
+			var numStr string
+			for _, c := range remain {
+				if c >= '0' && c <= '9' {
+					numStr += string(c)
+				} else if numStr != "" {
+					break
+				}
+			}
+			if sec, err := strconv.ParseInt(numStr, 10, 64); err == nil && sec > 0 {
+				return now.Add(time.Duration(sec) * time.Second)
+			}
+		}
+		if idx := strings.Index(lower, "try again in "); idx >= 0 {
+			remain := lower[idx+len("try again in "):]
+			var numStr string
+			for _, c := range remain {
+				if c >= '0' && c <= '9' {
+					numStr += string(c)
+				} else if numStr != "" {
+					break
+				}
+			}
+			if sec, err := strconv.ParseInt(numStr, 10, 64); err == nil && sec > 0 {
+				return now.Add(time.Duration(sec) * time.Second)
+			}
+		}
+	}
+	// 4. fallback
+	return now.Add(fallback)
+}
+
+// TemporarilyDisableChannelKey 对 multi-key channel 的单个 key 执行临时冻结。
+// kind: "rate_limit" | "overload" | "quota_exhausted" | "temp_unschedulable"
+// 不会将 key 写入 MultiKeyStatusList（永久禁用），也不会禁用整个 channel。
+func TemporarilyDisableChannelKey(channelID int, keyIdx int, kind string, untilUnix int64, reason string) {
+	ch, cacheErr := model.CacheGetChannel(channelID)
+	if cacheErr != nil || ch == nil || !ch.ChannelInfo.IsMultiKey {
+		return
+	}
+	if keyIdx < 0 || keyIdx >= len(ch.GetKeys()) {
+		return
+	}
+	info := &ch.ChannelInfo
+
+	lock := model.GetChannelPollingLock(channelID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	setKeyTempReason(info, keyIdx, reason)
+	switch kind {
+	case "rate_limit":
+		setKeyRateLimit(info, keyIdx, untilUnix)
+	case "overload":
+		setKeyOverload(info, keyIdx, untilUnix)
+	case "quota_exhausted":
+		setKeyQuotaReset(info, keyIdx, untilUnix)
+	case "temp_unschedulable":
+		setKeyTempUnschedulable(info, keyIdx, untilUnix)
+	}
+	_ = ch.SaveChannelInfo()
 }
 
 // extractResetSeconds 从响应体 JSON 中提取 reset 时间（秒）。

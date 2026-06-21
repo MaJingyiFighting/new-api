@@ -357,8 +357,9 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.Error())))
 
+	keyIdx := -1
 	if channelError.IsMultiKey {
-		keyIdx := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+		keyIdx = common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
 		processMultiKeyBackoff(c, channelError, err, keyIdx)
 	} else if service.ShouldDisableChannel(err) && channelError.AutoBan {
 		gopool.Go(func() {
@@ -367,7 +368,6 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	}
 
 	if constant.ErrorLogEnabled && types.IsRecordErrorLog(err) {
-		// 保存错误日志到mysql中
 		userId := c.GetInt("id")
 		tokenName := c.GetString("token_name")
 		modelName := c.GetString("original_model")
@@ -387,9 +387,17 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		adminInfo := make(map[string]interface{})
 		adminInfo["use_channel"] = c.GetStringSlice("use_channel")
 		isMultiKey := common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey)
-		if isMultiKey {
+		if isMultiKey && keyIdx >= 0 {
 			adminInfo["is_multi_key"] = true
-			adminInfo["multi_key_index"] = common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+			adminInfo["multi_key_index"] = keyIdx
+			if ch, cacheErr := model.CacheGetChannel(channelError.ChannelId); cacheErr == nil && ch != nil && ch.ChannelInfo.MultiKeyTempReason != nil {
+				if reason, ok := ch.ChannelInfo.MultiKeyTempReason[keyIdx]; ok {
+					adminInfo["multi_key_state"] = map[string]interface{}{
+						"selected_key_index": keyIdx,
+						"temp_suspend_kind":  reason,
+					}
+				}
+			}
 		}
 		service.AppendChannelAffinityAdminInfo(c, adminInfo)
 		other["admin_info"] = adminInfo
@@ -405,6 +413,7 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 
 // processMultiKeyBackoff 根据上游错误状态码，对 multi-key 渠道的单个 key 执行退避/禁用。
 // 移植自 sub2api ratelimit_service.HandleUpstreamErrorRaw() 的 429/401/403/529 处理逻辑。
+// 已升级：临时错误只冻结当前 key（per-key cooldown），不会永久禁用整个 channel。
 func processMultiKeyBackoff(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, keyIdx int) {
 	if keyIdx < 0 {
 		return
@@ -414,25 +423,27 @@ func processMultiKeyBackoff(c *gin.Context, channelError types.ChannelError, err
 	if cacheErr != nil || ch == nil || !ch.ChannelInfo.IsMultiKey {
 		return
 	}
-	// 检查 key index 是否有效
 	if keyIdx >= len(ch.GetKeys()) {
 		return
 	}
 
+	errMsg := strings.ToLower(err.Error())
+	now := time.Now()
+
 	switch err.StatusCode {
 	case http.StatusTooManyRequests: // 429
-		respHeaders := make(http.Header)
-		if ra := err.UpstreamRetryAfter; ra != "" {
-			respHeaders.Set("Retry-After", ra)
-		}
-		service.HandleUpstream429(ch, keyIdx, respHeaders, []byte(err.Error()))
+		until := service.ParseRetryAfterOrResetAt(err.UpstreamRetryAfter, "", errMsg, now, 60*time.Second)
+		service.TemporarilyDisableChannelKey(channelError.ChannelId, keyIdx, "rate_limit", until.Unix(), "429 rate limited")
 
 	case 529, http.StatusServiceUnavailable: // 529 / 503
-		respHeaders := make(http.Header)
-		if ra := err.UpstreamRetryAfter; ra != "" {
-			respHeaders.Set("Retry-After", ra)
+		// 先检查是否是 quota exhausted 类型（某些上游返回 503 但原因却是配额不足）
+		if isQuotaExhaustedError(errMsg) {
+			until := service.ParseRetryAfterOrResetAt(err.UpstreamRetryAfter, "", errMsg, now, 10*time.Minute)
+			service.TemporarilyDisableChannelKey(channelError.ChannelId, keyIdx, "quota_exhausted", until.Unix(), "quota exhausted (503)")
+		} else {
+			until := service.ParseRetryAfterOrResetAt(err.UpstreamRetryAfter, "", errMsg, now, 10*time.Minute)
+			service.TemporarilyDisableChannelKey(channelError.ChannelId, keyIdx, "overload", until.Unix(), "503/529 overload")
 		}
-		service.HandleUpstreamOverload(ch, keyIdx, respHeaders)
 
 	case http.StatusUnauthorized: // 401
 		service.HandleUpstreamAuthError(ch, keyIdx, false)
@@ -441,23 +452,40 @@ func processMultiKeyBackoff(c *gin.Context, channelError types.ChannelError, err
 		service.HandleUpstream403(ch, keyIdx)
 
 	case http.StatusPaymentRequired: // 402
-		// 余额不足，直接禁用 key
-		if ch.ChannelInfo.MultiKeyStatusList == nil {
-			ch.ChannelInfo.MultiKeyStatusList = make(map[int]int)
+		// 余额不足 / quota exhausted — 到下一小时恢复
+		nextHour := time.Date(now.Year(), now.Month(), now.Day(), now.Hour()+1, 0, 0, 0, now.Location())
+		if nextHour.Sub(now) < time.Minute {
+			nextHour = nextHour.Add(time.Hour)
 		}
-		ch.ChannelInfo.MultiKeyStatusList[keyIdx] = 3 // auto-disabled
-		_ = ch.SaveChannelInfo()
+		service.TemporarilyDisableChannelKey(channelError.ChannelId, keyIdx, "quota_exhausted", nextHour.Unix(), "402 quota exhausted")
 	}
 
-	// 全局 429/限流关键词匹配（非 multi-key 或 keyIdx 无效时的兜底）
+	// 429 关键词匹配兜底（非 multi-key 渠道或 keyIdx 无效时）
 	if !ch.ChannelInfo.IsMultiKey && err.StatusCode == http.StatusTooManyRequests && channelError.AutoBan {
-		respHeaders := make(http.Header)
+		hdr := make(http.Header)
 		if ra := err.UpstreamRetryAfter; ra != "" {
-			respHeaders.Set("Retry-After", ra)
+			hdr.Set("Retry-After", ra)
 		}
-		// 非 multi-key 渠道的 429 使用默认 5s 冷却
-		service.HandleUpstream429(ch, 0, respHeaders, []byte(err.Error()))
+		service.HandleUpstream429(ch, 0, hdr, []byte(err.Error()))
 	}
+}
+
+// isQuotaExhaustedError 检查错误信息是否包含配额耗尽关键词。
+func isQuotaExhaustedError(lowerMsg string) bool {
+	keywords := []string{
+		"quota exhausted",
+		"insufficient_quota",
+		"credit balance too low",
+		"exceeded your current quota",
+		"out of quota",
+		"rate limit exceeded for quota",
+	}
+	for _, kw := range keywords {
+		if strings.Contains(lowerMsg, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 func RelayMidjourney(c *gin.Context) {

@@ -79,11 +79,15 @@ type ChannelInfo struct {
 	MultiKeyTempUnschedulableUntil map[int]int64 `json:"multi_key_temp_unschedulable_until,omitempty"`
 	// 401/403 连续失败计数（Redis 同步，JSON 仅用于展示）
 	MultiKeyAuthFailCount map[int]int `json:"multi_key_auth_fail_count,omitempty"`
+	// 配额耗尽恢复时间（402/quota exhausted），key index -> Unix timestamp
+	MultiKeyQuotaResetAt map[int]int64 `json:"multi_key_quota_reset_at,omitempty"`
+	// 临时冻结原因，key index -> reason string
+	MultiKeyTempReason map[int]string `json:"multi_key_temp_reason,omitempty"`
 }
 
-// isKeySchedulable 检查 key 是否可调度（不处于限流/过载/临时禁用状态）。
+// IsKeySchedulable 检查 key 是否可调度（不处于限流/过载/临时禁用/配额冻结状态）。
 // 移植自 sub2api account.IsSchedulable() 的时间自动过期语义。
-func isKeySchedulable(info *ChannelInfo, keyIdx int, now time.Time) bool {
+func IsKeySchedulable(info *ChannelInfo, keyIdx int, now time.Time) bool {
 	if info.MultiKeyRateLimitUntil != nil {
 		if until, ok := info.MultiKeyRateLimitUntil[keyIdx]; ok && until > 0 && now.Unix() < until {
 			return false
@@ -96,6 +100,11 @@ func isKeySchedulable(info *ChannelInfo, keyIdx int, now time.Time) bool {
 	}
 	if info.MultiKeyTempUnschedulableUntil != nil {
 		if until, ok := info.MultiKeyTempUnschedulableUntil[keyIdx]; ok && until > 0 && now.Unix() < until {
+			return false
+		}
+	}
+	if info.MultiKeyQuotaResetAt != nil {
+		if until, ok := info.MultiKeyQuotaResetAt[keyIdx]; ok && until > 0 && now.Unix() < until {
 			return false
 		}
 	}
@@ -239,6 +248,20 @@ func (channel *Channel) GetKeys() []string {
 }
 
 func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
+	return channel.GetNextEnabledKeyWithAffinity(nil)
+}
+
+// GetNextEnabledKeyWithAffinity 选择下一个启用的 key。
+// 如果 preferredKeyIndex 不为 nil，优先使用该索引对应的 key（用于 key-level affinity）；
+// 此时不推进 MultiKeyPollingIndex，避免扰乱普通轮询。
+// 选择顺序：
+//  1. 非 multi-key channel 直接返回原 key
+//  2. 锁定 channel polling lock
+//  3. 清理已过期的临时状态
+//  4. 如果传入 preferredKeyIndex 且 key 可用则直接返回
+//  5. 否则按 MultiKeyModeRandom / MultiKeyModePolling 从 available keys 中选择
+//  6. 全部不可用时返回 ErrorCodeChannelNoAvailableKey
+func (channel *Channel) GetNextEnabledKeyWithAffinity(preferredKeyIndex *int) (string, int, *types.NewAPIError) {
 	// If not in multi-key mode, return the original key string directly.
 	if !channel.ChannelInfo.IsMultiKey {
 		return channel.Key, 0, nil
@@ -247,7 +270,6 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	// Obtain all keys (split by \n)
 	keys := channel.GetKeys()
 	if len(keys) == 0 {
-		// No keys available, return error, should disable the channel
 		return "", 0, types.NewError(errors.New("no keys available"), types.ErrorCodeChannelNoAvailableKey)
 	}
 
@@ -255,8 +277,13 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	statusList := channel.ChannelInfo.MultiKeyStatusList
-	// helper to get key status, default to enabled when missing
+	now := time.Now()
+	info := &channel.ChannelInfo
+
+	// cleanupExpiredState 在同一个锁内清理所有已过期的临时状态
+		CleanupExpiredState(info, now)
+
+	statusList := info.MultiKeyStatusList
 	getStatus := func(idx int) int {
 		if statusList == nil {
 			return common.ChannelStatusEnabled
@@ -267,34 +294,80 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		return common.ChannelStatusEnabled
 	}
 
-	now := time.Now()
-	info := &channel.ChannelInfo
-
 	// Collect indexes of enabled + schedulable keys
 	enabledIdx := make([]int, 0, len(keys))
+	rateLimitedCount := 0
+	overloadedCount := 0
+	quotaExhaustedCount := 0
+	tempUnschedCount := 0
+	disabledCount := 0
+	var nextRecovery int64 = 0
+
 	for i := range keys {
-		if getStatus(i) != common.ChannelStatusEnabled {
+		st := getStatus(i)
+		if st != common.ChannelStatusEnabled {
+			disabledCount++
 			continue
 		}
-		if !isKeySchedulable(info, i, now) {
+		if !IsKeySchedulable(info, i, now) {
+			// track which kind of temp state
+			if info.MultiKeyRateLimitUntil != nil {
+				if until, ok := info.MultiKeyRateLimitUntil[i]; ok && until > now.Unix() {
+					rateLimitedCount++
+					if nextRecovery == 0 || until < nextRecovery {
+						nextRecovery = until
+					}
+				}
+			}
+			if info.MultiKeyOverloadUntil != nil {
+				if until, ok := info.MultiKeyOverloadUntil[i]; ok && until > now.Unix() {
+					overloadedCount++
+					if nextRecovery == 0 || until < nextRecovery {
+						nextRecovery = until
+					}
+				}
+			}
+			if info.MultiKeyQuotaResetAt != nil {
+				if until, ok := info.MultiKeyQuotaResetAt[i]; ok && until > now.Unix() {
+					quotaExhaustedCount++
+					if nextRecovery == 0 || until < nextRecovery {
+						nextRecovery = until
+					}
+				}
+			}
+			if info.MultiKeyTempUnschedulableUntil != nil {
+				if until, ok := info.MultiKeyTempUnschedulableUntil[i]; ok && until > now.Unix() {
+					tempUnschedCount++
+					if nextRecovery == 0 || until < nextRecovery {
+						nextRecovery = until
+					}
+				}
+			}
 			continue
 		}
 		enabledIdx = append(enabledIdx, i)
 	}
-	// If no schedulable keys, try rate-limited keys (lazy recovery is not possible;
-	// return a channel:* error so caller can fallback to next channel or fail).
+
+	// 如果传入了 preferredKeyIndex，优先使用
+	if preferredKeyIndex != nil {
+		idx := *preferredKeyIndex
+		if idx >= 0 && idx < len(keys) && getStatus(idx) == common.ChannelStatusEnabled && IsKeySchedulable(info, idx, now) {
+			// 命中 affinity key，不推进 polling index
+			return keys[idx], idx, nil
+		}
+	}
+
 	if len(enabledIdx) == 0 {
-		return "", 0, types.NewError(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey)
+		errMsg := fmt.Sprintf("no enabled keys (disabled=%d, rate_limited=%d, overloaded=%d, quota_exhausted=%d, temp_unsched=%d)",
+			disabledCount, rateLimitedCount, overloadedCount, quotaExhaustedCount, tempUnschedCount)
+		return "", 0, types.NewError(errors.New(errMsg), types.ErrorCodeChannelNoAvailableKey)
 	}
 
 	switch channel.ChannelInfo.MultiKeyMode {
 	case constant.MultiKeyModeRandom:
-		// Randomly pick one enabled key
 		selectedIdx := enabledIdx[rand.Intn(len(enabledIdx))]
 		return keys[selectedIdx], selectedIdx, nil
 	case constant.MultiKeyModePolling:
-		// Use channel-specific lock to ensure thread-safe polling
-
 		channelInfo, err := CacheGetChannelInfo(channel.Id)
 		if err != nil {
 			return "", 0, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
@@ -305,28 +378,82 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 			}
 			if !common.MemoryCacheEnabled {
 				_ = channel.SaveChannelInfo()
-			} else {
-				// CacheUpdateChannel(channel)
 			}
 		}()
-		// Start from the saved polling index and look for the next enabled key
 		start := channelInfo.MultiKeyPollingIndex
 		if start < 0 || start >= len(keys) {
 			start = 0
 		}
 		for i := 0; i < len(keys); i++ {
 			idx := (start + i) % len(keys)
-			if getStatus(idx) == common.ChannelStatusEnabled {
-				// update polling index for next call (point to the next position)
+			if getStatus(idx) == common.ChannelStatusEnabled && IsKeySchedulable(info, idx, now) {
 				channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
 				return keys[idx], idx, nil
 			}
 		}
-		// Fallback – should not happen, but return first enabled key
 		return keys[enabledIdx[0]], enabledIdx[0], nil
 	default:
-		// Unknown mode, default to first enabled key (or original key string)
 		return keys[enabledIdx[0]], enabledIdx[0], nil
+	}
+}
+
+// CleanupExpiredState 清理所有已过期的临时冻结状态（惰性恢复）。
+func CleanupExpiredState(info *ChannelInfo, now time.Time) {
+	nowUnix := now.Unix()
+	if info.MultiKeyRateLimitUntil != nil {
+		for idx, until := range info.MultiKeyRateLimitUntil {
+			if until > 0 && nowUnix >= until {
+				delete(info.MultiKeyRateLimitUntil, idx)
+			}
+		}
+	}
+	if info.MultiKeyOverloadUntil != nil {
+		for idx, until := range info.MultiKeyOverloadUntil {
+			if until > 0 && nowUnix >= until {
+				delete(info.MultiKeyOverloadUntil, idx)
+			}
+		}
+	}
+	if info.MultiKeyTempUnschedulableUntil != nil {
+		for idx, until := range info.MultiKeyTempUnschedulableUntil {
+			if until > 0 && nowUnix >= until {
+				delete(info.MultiKeyTempUnschedulableUntil, idx)
+			}
+		}
+	}
+	if info.MultiKeyQuotaResetAt != nil {
+		for idx, until := range info.MultiKeyQuotaResetAt {
+			if until > 0 && nowUnix >= until {
+				delete(info.MultiKeyQuotaResetAt, idx)
+			}
+		}
+	}
+	// cleanup MultiKeyTempReason: 检查每个 reason 对应的 idx 是否仍在任一 temp 状态中
+	if info.MultiKeyTempReason != nil {
+		for idx := range info.MultiKeyTempReason {
+			stillFrozen := false
+			if v, ok := info.MultiKeyRateLimitUntil[idx]; ok && v > nowUnix {
+				stillFrozen = true
+			}
+			if !stillFrozen {
+				if v, ok := info.MultiKeyOverloadUntil[idx]; ok && v > nowUnix {
+					stillFrozen = true
+				}
+			}
+			if !stillFrozen {
+				if v, ok := info.MultiKeyTempUnschedulableUntil[idx]; ok && v > nowUnix {
+					stillFrozen = true
+				}
+			}
+			if !stillFrozen {
+				if v, ok := info.MultiKeyQuotaResetAt[idx]; ok && v > nowUnix {
+					stillFrozen = true
+				}
+			}
+			if !stillFrozen {
+				delete(info.MultiKeyTempReason, idx)
+			}
+		}
 	}
 }
 
