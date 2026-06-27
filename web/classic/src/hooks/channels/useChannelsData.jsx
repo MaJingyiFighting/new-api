@@ -39,6 +39,7 @@ import { useChannelUpstreamUpdates } from './useChannelUpstreamUpdates';
 import { parseUpstreamUpdateMeta } from './upstreamUpdateUtils';
 import { Modal, Button } from '@douyinfe/semi-ui';
 import { openCodexUsageModal } from '../../components/table/channels/modals/CodexUsageModal';
+import { openCodingPlanQuotaModal } from '../../components/table/channels/modals/CodingPlanQuotaModal';
 
 export const useChannelsData = () => {
   const { t } = useTranslation();
@@ -763,6 +764,16 @@ export const useChannelsData = () => {
           if (ok) showSuccess(t('已复制'));
           else showError(t('复制失败'));
         },
+      });
+      return;
+    }
+
+    // Coding plan channels: show quota detail modal
+    if (record?.channel_info?.multi_key_quota_used_pct) {
+      openCodingPlanQuotaModal({
+        t,
+        record: { ...record, keys: record.key },
+        onRefresh: () => loadChannels(activePage, pageSize, idSort, enableTagMode),
       });
       return;
     }

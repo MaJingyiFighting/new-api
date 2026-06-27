@@ -328,6 +328,27 @@ export const getChannelsColumns = ({
   openUpstreamUpdateModal,
   detectChannelUpstreamUpdates,
 }) => {
+  // Helper: check if a record has coding plan quota data
+  const isCodingPlanChannel = (record) => {
+    const data = record?.channel_info?.multi_key_quota_used_pct;
+    return data && typeof data === 'object' && Object.keys(data).length > 0;
+  };
+  const codingPlanStats = (record) => {
+    const data = record?.channel_info?.multi_key_quota_used_pct || {};
+    const vals = Object.values(data).filter(v => typeof v === 'number' && !isNaN(v));
+    if (vals.length === 0) return null;
+    return { min: Math.min(...vals), max: Math.max(...vals), count: vals.length };
+  };
+  const getQuotaColor = (pct) => {
+    if (pct >= 85) return 'red';
+    if (pct >= 60) return 'amber';
+    return 'green';
+  };
+  const getQuotaLabelColor = (pct) => {
+    if (pct >= 85) return '#ef4444';
+    if (pct >= 60) return '#f59e0b';
+    return '#22c55e';
+  };
   return [
     {
       key: COLUMN_KEYS.ID,
@@ -528,34 +549,81 @@ export const getChannelsColumns = ({
       dataIndex: 'expired_time',
       render: (text, record, index) => {
         if (record.children === undefined) {
+          const codingPlan = isCodingPlanChannel(record);
+          const cpStats = codingPlanStats(record);
           return (
             <div>
               <Space spacing={1}>
-                <Tooltip content={t('已用额度')}>
-                  <Tag color='white' type='ghost' shape='circle'>
-                    {renderQuota(record.used_quota)}
+                {codingPlan && cpStats ? (
+                  <Tag
+                    color='white'
+                    type='ghost'
+                    shape='circle'
+                    className='cursor-pointer'
+                    onClick={() => updateChannelBalance(record)}
+                  >
+                    <Tooltip
+                      content={
+                        <div style={{ fontSize: 12 }}>
+                          <div>{t('配额')}: {cpStats.min.toFixed(0)}% - {cpStats.max.toFixed(0)}%</div>
+                          <div>{t('Key数量')}: {cpStats.count}</div>
+                          <div>{t('点击查看详情')}</div>
+                        </div>
+                      }
+                    >
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 4,
+                          fontWeight: 500,
+                          color: getQuotaLabelColor(cpStats.max),
+                        }}
+                      >
+                        <span
+                          style={{
+                            width: 8,
+                            height: 8,
+                            borderRadius: '50%',
+                            display: 'inline-block',
+                            backgroundColor: getQuotaColor(cpStats.max),
+                          }}
+                        />
+                        {cpStats.max.toFixed(0)}%
+                      </span>
+                    </Tooltip>
                   </Tag>
-                </Tooltip>
+                ) : (
+                  <Tooltip content={t('已用额度')}>
+                    <Tag color='white' type='ghost' shape='circle'>
+                      {renderQuota(record.used_quota)}
+                    </Tag>
+                  </Tooltip>
+                )}
                 <Tooltip
                   content={
-                    record.type === 57
-                      ? t('查看 Codex 帐号信息与用量')
-                      : t('剩余额度') +
-                        ': ' +
-                        renderQuotaWithAmount(record.balance) +
-                        t('，点击更新')
+                    codingPlan
+                      ? t('点击查看 Coding Plan 配额详情')
+                      : record.type === 57
+                        ? t('查看 Codex 帐号信息与用量')
+                        : t('剩余额度') +
+                          ': ' +
+                          renderQuotaWithAmount(record.balance) +
+                          t('，点击更新')
                   }
                 >
                   <Tag
-                    color={record.type === 57 ? 'light-blue' : 'white'}
-                    type={record.type === 57 ? 'light' : 'ghost'}
+                    color={record.type === 57 ? 'light-blue' : codingPlan ? 'light-green' : 'white'}
+                    type={record.type === 57 || codingPlan ? 'light' : 'ghost'}
                     shape='circle'
-                    className={record.type === 57 ? 'cursor-pointer' : ''}
+                    className={record.type === 57 || codingPlan ? 'cursor-pointer' : ''}
                     onClick={() => updateChannelBalance(record)}
                   >
-                    {record.type === 57
-                      ? t('帐号信息')
-                      : renderQuotaWithAmount(record.balance)}
+                    {codingPlan
+                      ? t('配额')
+                      : record.type === 57
+                        ? t('帐号信息')
+                        : renderQuotaWithAmount(record.balance)}
                   </Tag>
                 </Tooltip>
               </Space>
