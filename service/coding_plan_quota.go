@@ -517,17 +517,7 @@ func parseTime(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unable to parse time: %s", s)
 }
 
-func unixFlexibleTime(n int64) *time.Time {
-	if n <= 0 {
-		return nil
-	}
-	if n > 1_000_000_000_000 {
-		t := time.UnixMilli(n).UTC()
-		return &t
-	}
-	t := time.Unix(n, 0).UTC()
-	return &t
-}
+// unixFlexibleTime is defined in coding_plan_error.go to avoid duplication.
 
 func usedPercentFromLimitRemaining(limit, remaining float64) float64 {
 	if limit <= 0 {

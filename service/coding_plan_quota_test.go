@@ -340,7 +340,7 @@ func TestDetectCodingPlanQuotaProbe_Unknown(t *testing.T) {
 }
 
 func TestProbeCodingPlanQuota_UnsupportedProvider(t *testing.T) {
-	snapshot, err := ProbeCodingPlanQuota(context.Background(), "https://ark.cn-beijing.volces.com/api/v3", "key", "")
+	snapshot, err := ProbeCodingPlanQuota(context.Background(), "https://ark.cn-beijing.volces.com/api/v3", "key", constant.CodingPlanProviderVolcengine)
 	require.NoError(t, err)
 	require.NotNil(t, snapshot)
 	require.Equal(t, CodingPlanProbeStatusUnsupported, snapshot.QuotaProbeStatus)
@@ -362,7 +362,9 @@ func TestParseCodingPlanHTTPError_401(t *testing.T) {
 
 func TestParseCodingPlanHTTPError_403(t *testing.T) {
 	snapshot := httpErrorSnapshot(constant.CodingPlanProviderKimi, 403)
-	require.True(t, snapshot.CredentialExpired)
+	require.False(t, snapshot.CredentialExpired)
+	require.False(t, snapshot.Success)
+	require.Equal(t, 403, snapshot.HTTPStatus)
 }
 
 func TestParseCodingPlanHTTPError_500(t *testing.T) {
@@ -370,7 +372,7 @@ func TestParseCodingPlanHTTPError_500(t *testing.T) {
 	require.False(t, snapshot.CredentialExpired)
 	require.False(t, snapshot.Success)
 	require.Contains(t, snapshot.ErrorMessage, "HTTP 500")
-	require.NotNil(t, snapshot.Raw)
+	require.Nil(t, snapshot.Raw)
 }
 
 func TestParseCodingPlanResetTime_ISODate(t *testing.T) {
@@ -452,7 +454,8 @@ func TestProbeCodingPlanQuota_WithKimiURL(t *testing.T) {
 	snapshot, err := probe.Probe(context.Background(), "https://api.moonshot.cn/v1", "key")
 	require.NoError(t, err)
 	require.True(t, snapshot.Success)
-	require.Equal(t, "/v1/usages", requestPath)
+	// api.moonshot.cn host triggers the default Kimi endpoint path /coding/v1/usages
+	require.Equal(t, "/coding/v1/usages", requestPath)
 }
 
 func TestUnsupportedCodingPlanQuotaSnapshot(t *testing.T) {
