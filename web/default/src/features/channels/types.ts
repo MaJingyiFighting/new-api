@@ -71,7 +71,30 @@ export const channelSchema = z.object({
     multi_key_mode: 'random',
   }),
   settings: z.string().default('{}'), // other_settings JSON
+  // Coding plan (subscription) quota windows — backend serializes map[int]float64
+  // as an object with stringified keys.
+  multi_key_quota_used_pct: z.record(z.string(), z.number()).optional(),
+  multi_key_quota_window_end: z.record(z.string(), z.number()).optional(),
+  multi_key_quota_window_type: z.record(z.string(), z.string()).optional(),
 })
+
+// ============================================================================
+// Coding Plan Quota Types
+// ============================================================================
+
+/** Per-key quota window information returned by /api/channel/update_quota/:id. */
+export interface CodingPlanKeyQuota {
+  used_pct: number
+  window_end: number
+  window_type: string
+}
+
+/** Response shape for GET /api/channel/update_quota/:id. */
+export interface CodingPlanQuotaResponse {
+  success: boolean
+  message?: string
+  quota_info?: Record<string, CodingPlanKeyQuota>
+}
 
 export type Channel = z.infer<typeof channelSchema>
 

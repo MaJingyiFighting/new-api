@@ -5042,6 +5042,24 @@
     "Zero retention": "零数据保留",
     "Zhipu": "智谱",
     "Zhipu V4": "智谱 V4",
-    "Zoom": "缩放"
+    "Zoom": "缩放",
+    "Quota Details": "配额详情",
+    "Query Coding Plan Quota": "查询订阅配额",
+    "Query Coding Plan Quota for": "查询订阅配额：",
+    "Window": "窗口",
+    "Resets in": "重置于",
+    "Healthy keys": "健康 key",
+    "Exhausted": "已耗尽",
+    "5h": "5小时",
+    "Weekly": "周",
+    "Monthly": "月",
+    "Reset at": "重置时间",
+    "Key {{index}}": "Key {{index}}",
+    "Quota refreshed": "配额已刷新",
+    "Failed to query quota": "查询配额失败",
+    "No quota data": "暂无配额数据",
+    "Upstream did not return any quota windows.": "上游未返回任何配额窗口。",
+    "Status": "状态",
+    "Healthy": "健康"
   }
 }

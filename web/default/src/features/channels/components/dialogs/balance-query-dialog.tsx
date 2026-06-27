@@ -26,8 +26,9 @@ import { formatTimestampToDate } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import { Dialog } from '@/components/dialog'
 import { getCodexUsage, updateChannelBalance } from '../../api'
-import { channelsQueryKeys } from '../../lib'
+import { channelsQueryKeys, isQuotaAvailable } from '../../lib'
 import { useChannels } from '../channels-provider'
+import { QuotaDetailDialog } from '../quota-detail-dialog'
 import {
   CodexUsageDialog,
   type CodexUsageDialogData,
@@ -54,6 +55,7 @@ export function BalanceQueryDialog({
     useState<CodexUsageDialogData | null>(null)
 
   const isCodex = currentRow?.type === 57
+  const isCodingPlan = !isCodex && isQuotaAvailable(currentRow)
 
   const handleQueryCodexUsage = async () => {
     const row = currentRow
@@ -149,6 +151,19 @@ export function BalanceQueryDialog({
         response={codexUsageResponse}
         onRefresh={handleQueryCodexUsage}
         isRefreshing={isQuerying}
+      />
+    )
+  }
+
+  if (isCodingPlan) {
+    return (
+      <QuotaDetailDialog
+        open={open}
+        onOpenChange={(v) => {
+          if (!v) handleClose()
+        }}
+        channelId={currentRow.id}
+        channelName={currentRow.name}
       />
     )
   }

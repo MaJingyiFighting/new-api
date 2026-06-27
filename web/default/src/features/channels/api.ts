@@ -26,6 +26,7 @@ import type {
   ChannelBalanceResponse,
   ChannelOpsResponse,
   ChannelTestResponse,
+  CodingPlanQuotaResponse,
   CopyChannelParams,
   CopyChannelResponse,
   FetchModelsResponse,
@@ -241,6 +242,21 @@ export async function fetchUpstreamModels(
 ): Promise<FetchModelsResponse> {
   const res = await api.get(
     `/api/channel/fetch_models/${id}`,
+    channelActionConfig()
+  )
+  return res.data
+}
+
+/**
+ * Query coding plan (subscription) quota windows for each key on a multi-key
+ * channel. Returns per-key used percentage, window end (Unix seconds) and
+ * window type ("5h" / "weekly" / "monthly").
+ */
+export async function queryChannelQuota(
+  id: number
+): Promise<CodingPlanQuotaResponse> {
+  const res = await api.get(
+    `/api/channel/update_quota/${id}`,
     channelActionConfig()
   )
   return res.data

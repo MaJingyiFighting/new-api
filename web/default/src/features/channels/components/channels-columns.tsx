@@ -68,9 +68,11 @@ import {
   getChannelTypeLabel,
   getResponseTimeConfig,
   isMultiKeyChannel,
+  isQuotaAvailable,
   parseModelsList,
   parseGroupsList,
   parseChannelSettings,
+  summarizeCodingPlanQuota,
   handleUpdateChannelField,
   handleUpdateTagField,
   handleUpdateChannelBalance,
@@ -87,6 +89,8 @@ import {
   type CodexUsageDialogData,
 } from './dialogs/codex-usage-dialog'
 import { NumericSpinnerInput } from './numeric-spinner-input'
+import { QuotaDetailDialog } from './quota-detail-dialog'
+import { QuotaWindowBadge } from './quota-window-badge'
 
 function parseIonetMeta(otherInfo: string | null | undefined): null | {
   source?: string
@@ -307,6 +311,7 @@ function BalanceCell({ channel }: { channel: Channel }) {
   const [codexUsageOpen, setCodexUsageOpen] = useState(false)
   const [codexUsageResponse, setCodexUsageResponse] =
     useState<CodexUsageDialogData | null>(null)
+  const [quotaDetailOpen, setQuotaDetailOpen] = useState(false)
   const currencyLabel = getCurrencyLabel()
   const tokenSuffix = currencyLabel === 'Tokens' ? ' Tokens' : ''
   const withSuffix = (value: string) =>
@@ -330,6 +335,13 @@ function BalanceCell({ channel }: { channel: Channel }) {
   const remainingLabel = `${t('Remaining:')} ${remainingFull}`
   const maskedUsedLabel = `${t('Used:')} ${SENSITIVE_MASK}`
   const maskedRemainingLabel = `${t('Remaining:')} ${SENSITIVE_MASK}`
+
+  // Coding-plan channels expose per-key quota windows — render a usage badge
+  // with a live countdown instead of the regular balance/used pair.
+  const codingPlan = !isTagRow && isQuotaAvailable(channel)
+  const codingPlanSummary = codingPlan
+    ? summarizeCodingPlanQuota(channel)
+    : null
 
   // Tag row: only show cumulative used quota
   if (isTagRow) {
@@ -357,6 +369,28 @@ function BalanceCell({ channel }: { channel: Channel }) {
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
+    )
+  }
+
+  // Coding-plan row: render quota badge and detail dialog instead of balance.
+  if (codingPlan && codingPlanSummary) {
+    return (
+      <>
+        <QuotaWindowBadge
+          usedPct={codingPlanSummary.avgUsedPct}
+          windowType={codingPlanSummary.windowType}
+          windowEnd={codingPlanSummary.windowEnd}
+          totalKeys={codingPlanSummary.totalKeys}
+          healthyKeys={codingPlanSummary.healthyKeys}
+          onClick={() => setQuotaDetailOpen(true)}
+        />
+        <QuotaDetailDialog
+          open={quotaDetailOpen}
+          onOpenChange={setQuotaDetailOpen}
+          channelId={channel.id}
+          channelName={channel.name}
+        />
+      </>
     )
   }
 

@@ -5017,6 +5017,24 @@
     "Zero retention": "Zero retention",
     "Zhipu": "Zhipu",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "Quota Details": "Quota Details",
+    "Query Coding Plan Quota": "Query Coding Plan Quota",
+    "Query Coding Plan Quota for": "Query Coding Plan Quota for",
+    "Window": "Window",
+    "Resets in": "Resets in",
+    "Healthy keys": "Healthy keys",
+    "Exhausted": "Exhausted",
+    "5h": "5h",
+    "Weekly": "Weekly",
+    "Monthly": "Monthly",
+    "Reset at": "Reset at",
+    "Key {{index}}": "Key {{index}}",
+    "Quota refreshed": "Quota refreshed",
+    "Failed to query quota": "Failed to query quota",
+    "No quota data": "No quota data",
+    "Upstream did not return any quota windows.": "Upstream did not return any quota windows.",
+    "Status": "Status",
+    "Healthy": "Healthy"
   }
 }

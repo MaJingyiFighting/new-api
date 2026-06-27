@@ -493,6 +493,130 @@ export function formatQuota(quota: number): string {
 }
 
 // ============================================================================
+// Coding Plan Quota Helpers
+// ============================================================================
+
+/** Color variant for a coding plan quota usage percentage. */
+export type QuotaVariant = 'green' | 'yellow' | 'red'
+
+/** Map a usage percentage to a traffic-light style color variant. */
+export function getQuotaVariant(usedPct: number): QuotaVariant {
+  if (usedPct < 60) {
+    return 'green'
+  }
+  if (usedPct <= 85) {
+    return 'yellow'
+  }
+  return 'red'
+}
+
+/** True when the channel carries coding plan quota window data. */
+export function isQuotaAvailable(channel: Channel): boolean {
+  const map = channel.multi_key_quota_used_pct
+  return Boolean(map && Object.keys(map).length > 0)
+}
+
+/**
+ * Aggregate a coding plan channel's quota usage across all keys.
+ * Returns the average used percentage and the count of healthy (<= 85%) keys.
+ */
+export function summarizeCodingPlanQuota(channel: Channel): {
+  avgUsedPct: number
+  totalKeys: number
+  healthyKeys: number
+  exhaustedKeys: number
+  windowType: string
+  windowEnd: number
+} {
+  const usedMap = channel.multi_key_quota_used_pct ?? {}
+  const endMap = channel.multi_key_quota_window_end ?? {}
+  const typeMap = channel.multi_key_quota_window_type ?? {}
+
+  const entries = Object.entries(usedMap)
+  const total = entries.length
+  if (total === 0) {
+    return {
+      avgUsedPct: 0,
+      totalKeys: 0,
+      healthyKeys: 0,
+      exhaustedKeys: 0,
+      windowType: '',
+      windowEnd: 0,
+    }
+  }
+
+  let sum = 0
+  let healthy = 0
+  let exhausted = 0
+  let latestEnd = 0
+  let firstType = ''
+  for (const [key, pct] of entries) {
+    const safePct = Number.isFinite(pct) ? pct : 0
+    sum += safePct
+    if (safePct < 85) {
+      healthy += 1
+    } else {
+      exhausted += 1
+    }
+    const end = endMap[key]
+    if (typeof end === 'number' && end > latestEnd) {
+      latestEnd = end
+    }
+    if (!firstType) {
+      const candidate = typeMap[key]
+      if (candidate) {
+        firstType = candidate
+      }
+    }
+  }
+
+  return {
+    avgUsedPct: sum / total,
+    totalKeys: total,
+    healthyKeys: healthy,
+    exhaustedKeys: exhausted,
+    windowType: firstType,
+    windowEnd: latestEnd,
+  }
+}
+
+/**
+ * Format the time remaining until a Unix-seconds window end as a compact,
+ * human-readable countdown (e.g. "3d 12h", "1h 23m", "12m", "45s").
+ */
+export function formatQuotaWindowCountdown(endUnix: number): string {
+  if (!endUnix || endUnix <= 0) {
+    return '-'
+  }
+  const nowSec = Math.floor(Date.now() / 1000)
+  const diff = Math.max(0, endUnix - nowSec)
+  if (diff === 0) {
+    return '0s'
+  }
+
+  const MIN = 60
+  const HOUR = 60 * MIN
+  const DAY = 24 * HOUR
+
+  if (diff < HOUR) {
+    const m = Math.floor(diff / MIN)
+    const s = diff % MIN
+    if (m === 0) {
+      return `${s}s`
+    }
+    return s > 0 ? `${m}m ${s}s` : `${m}m`
+  }
+  if (diff < DAY) {
+    const h = Math.floor(diff / HOUR)
+    const m = Math.floor((diff % HOUR) / MIN)
+    return m > 0 ? `${h}h ${m}m` : `${h}h`
+  }
+  const d = Math.floor(diff / DAY)
+  const h = Math.floor((diff % DAY) / HOUR)
+  return h > 0 ? `${d}d ${h}h` : `${d}d`
+}
+
+// ============================================================================
 // Priority & Weight Utilities
 // ============================================================================
 
