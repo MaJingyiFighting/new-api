@@ -328,10 +328,11 @@ export const getChannelsColumns = ({
   openUpstreamUpdateModal,
   detectChannelUpstreamUpdates,
 }) => {
-  // Helper: check if a record has coding plan quota data
+  // Coding Plan channel types that support quota queries (Kimi/Moonshot, Zhipu, MiniMax)
+  const CODING_PLAN_TYPES = [25, 26, 16, 35];
+  // Helper: check if a record is a coding plan channel
   const isCodingPlanChannel = (record) => {
-    const data = record?.channel_info?.multi_key_quota_used_pct;
-    return data && typeof data === 'object' && Object.keys(data).length > 0;
+    return CODING_PLAN_TYPES.includes(record?.type);
   };
   const codingPlanStats = (record) => {
     const data = record?.channel_info?.multi_key_quota_used_pct || {};

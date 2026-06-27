@@ -754,6 +754,10 @@ export const useChannelsData = () => {
     }
   };
 
+  // Coding Plan channel types that support quota queries (Kimi/Moonshot, Zhipu, MiniMax)
+  const CODING_PLAN_CHANNEL_TYPES = [25, 26, 16, 35];
+  const isCodingPlanChannel = (type) => CODING_PLAN_CHANNEL_TYPES.includes(type);
+
   const updateChannelBalance = async (record) => {
     if (record?.type === 57) {
       openCodexUsageModal({
@@ -769,7 +773,7 @@ export const useChannelsData = () => {
     }
 
     // Coding plan channels: show quota detail modal
-    if (record?.channel_info?.multi_key_quota_used_pct) {
+    if (isCodingPlanChannel(record?.type)) {
       openCodingPlanQuotaModal({
         t,
         record: { ...record, keys: record.key },
