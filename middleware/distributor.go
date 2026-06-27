@@ -142,7 +142,7 @@ func Distribute() func(c *gin.Context) {
 						TokenGroup:  usingGroup,
 						RequestPath: c.Request.URL.Path,
 						Retry:       common.GetPointer(0),
-					})
+					}, nil)
 					if err != nil {
 						showGroup := usingGroup
 						if usingGroup == "auto" {
