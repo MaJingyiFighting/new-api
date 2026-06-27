@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 )
 
@@ -112,12 +114,19 @@ func HandleUpstream403(ch *model.Channel, keyIdx int) {
 	_ = ch.SaveChannelInfo()
 }
 
-// HandleUpstreamSuccess 处理上游成功响应（清除退避状态）。
+// HandleUpstreamSuccess 处理上游成功响应（清除退避状态 + load_aware 运行时统计）。
 // 相当于 sub2api 的 ClearRateLimit + ResetOpenAI403Counter。
+// 当 channel 处于 load_aware 模式时,额外更新 MultiKeyLastUsedAt。
 func HandleUpstreamSuccess(ch *model.Channel, keyIdx int) {
 	info := &ch.ChannelInfo
 	clearKeyBackoffState(info, keyIdx)
 	clearKeyAuthFailCount(info, keyIdx)
+	if info.MultiKeyMode == constant.MultiKeyModeLoadAware {
+		if info.MultiKeyLastUsedAt == nil {
+			info.MultiKeyLastUsedAt = make(map[int]int64)
+		}
+		info.MultiKeyLastUsedAt[keyIdx] = time.Now().Unix()
+	}
 	_ = ch.SaveChannelInfo()
 }
 
@@ -337,3 +346,61 @@ func extractResetSeconds(body string) int64 {
 	}
 	return 0
 }
+
+// ============================================================
+// Agent B additions: load_aware runtime stats + 429 storm detection
+// ============================================================
+
+// RecordKeyUsage 记录 key 的最后使用时间,用于 load_aware 模式 LRU 决策.
+// 该函数在每次成功或失败的 key 调度之后被调用,以保持 LastUsedAt 最新.
+// 仅当 channel 处于 load_aware 模式时,才会更新 MultiKeyLastUsedAt 并持久化.
+func RecordKeyUsage(channelId int, keyIdx int) {
+	if channelId <= 0 || keyIdx < 0 {
+		return
+	}
+	channel, err := model.CacheGetChannel(channelId)
+	if err != nil || channel == nil {
+		return
+	}
+	if !channel.ChannelInfo.IsMultiKey {
+		return
+	}
+	if channel.ChannelInfo.MultiKeyMode != constant.MultiKeyModeLoadAware {
+		return
+	}
+	if channel.ChannelInfo.MultiKeyLastUsedAt == nil {
+		channel.ChannelInfo.MultiKeyLastUsedAt = make(map[int]int64)
+	}
+	channel.ChannelInfo.MultiKeyLastUsedAt[keyIdx] = time.Now().Unix()
+	if !common.MemoryCacheEnabled {
+		_ = channel.SaveChannelInfo()
+	}
+}
+
+// HandleUpstream429Storm 记录一次上游 429 事件并判断是否进入 429 风暴.
+// 该函数包装 model 包实现,在此处提供 service 层的稳定 API.
+func HandleUpstream429Storm(channelId int, channelType int) bool {
+	return model.HandleUpstream429Storm(channelId, channelType)
+}
+
+// IsKeyStormPaused 判断指定 key 是否处于 429 风暴暂停窗口内.
+func IsKeyStormPaused(channelId int, keyIdx int, nowSec int64) bool {
+	return model.IsKeyStormPaused(channelId, keyIdx, nowSec)
+}
+
+// GetKey429StormCount 获取指定 channel 当前的 429 风暴计数.
+func GetKey429StormCount(channelId int) int {
+	return model.GetKey429StormCount(channelId)
+}
+
+// IsChannelIn429Storm 判断指定 channel 当前是否处于 429 风暴模式.
+func IsChannelIn429Storm(channelId int) bool {
+	return model.IsChannelIn429Storm(channelId)
+}
+
+// ResetChannel429Storm 重置指定 channel 的 429 风暴状态.
+func ResetChannel429Storm(channelId int) {
+	model.ResetChannel429Storm(channelId)
+}
+
+// (HandleUpstreamSuccess 已存在于 line 117 的 HEAD 版本中,此处删除 Agent B 的重复定义)

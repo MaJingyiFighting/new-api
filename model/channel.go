@@ -87,6 +87,10 @@ type ChannelInfo struct {
 	// quota (5-hour / weekly usage). Populated by the periodic quota refresh
 	// task (PR-4) and by on-demand probes. Nil when no probe has been run yet.
 	CodingPlanQuota *CodingPlanQuotaState `json:"coding_plan_quota,omitempty"`
+
+	// load_aware 模式使用的运行时统计,持久化在 channel_info 中
+	MultiKeyQuotaUsedPct map[int]float64 `json:"multi_key_quota_used_pct,omitempty"` // 配额使用率,key index -> 已使用百分比 (0-100)
+	MultiKeyLastUsedAt   map[int]int64   `json:"multi_key_last_used_at,omitempty"`   // 上次使用时间(unix 秒),key index -> time
 }
 
 // IsKeySchedulable 检查 key 是否可调度（不处于限流/过载/临时禁用/配额冻结状态）。
