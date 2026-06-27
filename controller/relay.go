@@ -304,7 +304,8 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 			AutoBan: &autoBanInt,
 		}, nil
 	}
-	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
+	triedTypes := getTriedChannelTypes(c)
+	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam, triedTypes)
 
 	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
 
@@ -315,11 +316,56 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 
+	// Record the chosen channel's Type so a subsequent retry (if this
+	// request fails) prefers a different provider Type, avoiding repeated
+	// hits on the same upstream that just failed.
+	setTriedChannelType(c, channel.Type)
+	if retryParam != nil {
+		retryParam.AddTriedChannelType(channel.Type)
+	}
+
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
 	if newAPIError != nil {
 		return nil, newAPIError
 	}
 	return channel, nil
+}
+
+// triedChannelTypesContextKey is the gin.Context key under which we store the
+// list of channel Types already attempted for the current request. Key is
+// scoped to this controller file (not exported) since only getChannel reads
+// or writes it.
+const triedChannelTypesContextKey = "tried_channel_types"
+
+// getTriedChannelTypes returns the channel Types that have already been
+// attempted for this request, or nil if none have been recorded yet.
+func getTriedChannelTypes(c *gin.Context) []int {
+	if c == nil {
+		return nil
+	}
+	if v, ok := c.Get(triedChannelTypesContextKey); ok {
+		if list, ok := v.([]int); ok {
+			return list
+		}
+	}
+	return nil
+}
+
+// setTriedChannelType appends a channel's Type to the per-request tried list.
+// Stored as []int (a small, immutable-after-set value) so concurrent readers
+// always see the value that was set when they called Get.
+func setTriedChannelType(c *gin.Context, channelType int) {
+	if c == nil {
+		return
+	}
+	tried := []int{}
+	if v, ok := c.Get(triedChannelTypesContextKey); ok {
+		if list, ok := v.([]int); ok {
+			tried = list
+		}
+	}
+	tried = append(tried, channelType)
+	c.Set(triedChannelTypesContextKey, tried)
 }
 
 func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {

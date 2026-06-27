@@ -12,12 +12,36 @@ import (
 )
 
 type RetryParam struct {
-	Ctx          *gin.Context
-	TokenGroup   string
-	ModelName    string
-	RequestPath  string
-	Retry        *int
-	resetNextTry bool
+	Ctx               *gin.Context
+	TokenGroup        string
+	ModelName         string
+	RequestPath       string
+	Retry             *int
+	resetNextTry      bool
+	TriedChannelTypes []int
+}
+
+// GetTriedChannelTypes returns a copy of the channel Types already attempted
+// for this request. Callers can append the picked channel's Type via
+// AddTriedChannelType to keep retry-time selection aware of cross-type
+// failures.
+func (p *RetryParam) GetTriedChannelTypes() []int {
+	if p == nil {
+		return nil
+	}
+	out := make([]int, len(p.TriedChannelTypes))
+	copy(out, p.TriedChannelTypes)
+	return out
+}
+
+// AddTriedChannelType appends a channel Type to the tried list. Duplicate
+// entries are not collapsed; the model-layer filter handles dedup implicitly
+// via set membership lookup.
+func (p *RetryParam) AddTriedChannelType(t int) {
+	if p == nil {
+		return
+	}
+	p.TriedChannelTypes = append(p.TriedChannelTypes, t)
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -81,7 +105,46 @@ func (p *RetryParam) ResetRetryNextTry() {
 //
 //	Retry=3: GroupB, priority1 (startRetryIndex=2, priorityRetry=1)
 //	         分组B, 优先级1
-func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, error) {
+// CacheGetRandomSatisfiedChannel tries to get a random channel that satisfies the requirements.
+// 尝试获取一个满足要求的随机渠道。
+//
+// triedChannelTypes lets callers (e.g. controller/relay.go on retry) tell the
+// selector to avoid re-picking channels whose Type already failed in earlier
+// attempts for this same request. nil preserves the original behavior.
+//
+// For "auto" tokenGroup with cross-group Retry enabled:
+// 对于启用了跨分组重试的 "auto" tokenGroup：
+//
+//   - Each group will exhaust all its priorities before moving to the next group.
+//     每个分组会用完所有优先级后才会切换到下一个分组。
+//
+//   - Uses ContextKeyAutoGroupIndex to track current group index.
+//     使用 ContextKeyAutoGroupIndex 跟踪当前分组索引。
+//
+//   - Uses ContextKeyAutoGroupRetryIndex to track the global Retry count when current group started.
+//     使用 ContextKeyAutoGroupRetryIndex 跟踪当前分组开始时的全局重试次数。
+//
+//   - priorityRetry = Retry - startRetryIndex, represents the priority level within current group.
+//     priorityRetry = Retry - startRetryIndex，表示当前分组内的优先级级别。
+//
+//   - When GetRandomSatisfiedChannel returns nil (priorities exhausted), moves to next group.
+//     当 GetRandomSatisfiedChannel 返回 nil（优先级用完）时，切换到下一个分组。
+//
+// Example flow (2 groups, each with 2 priorities, RetryTimes=3):
+// 示例流程（2个分组，每个有2个优先级，RetryTimes=3）：
+//
+//	Retry=0: GroupA, priority0 (startRetryIndex=0, priorityRetry=0)
+//	         分组A, 优先级0
+//
+//	Retry=1: GroupA, priority1 (startRetryIndex=0, priorityRetry=1)
+//	         分组A, 优先级1
+//
+//	Retry=2: GroupA exhausted → GroupB, priority0 (startRetryIndex=2, priorityRetry=0)
+//	         分组A用完 → 分组B, 优先级0
+//
+//	Retry=3: GroupB, priority1 (startRetryIndex=2, priorityRetry=1)
+//	         分组B, 优先级1
+func CacheGetRandomSatisfiedChannel(param *RetryParam, triedChannelTypes []int) (*model.Channel, string, error) {
 	var channel *model.Channel
 	var err error
 	selectGroup := param.TokenGroup
@@ -116,7 +179,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, param.RequestPath)
+			channel, _ = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, param.RequestPath, triedChannelTypes)
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
 				// 当前分组没有该模型的可用渠道，尝试下一个分组
@@ -154,7 +217,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			break
 		}
 	} else {
-		channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.GetRetry(), param.RequestPath)
+		channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.GetRetry(), param.RequestPath, triedChannelTypes)
 		if err != nil {
 			return nil, param.TokenGroup, err
 		}

@@ -105,7 +105,16 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
-func GetRandomSatisfiedChannel(group string, model string, retry int, requestPath string) (*Channel, error) {
+// GetRandomSatisfiedChannel picks a random channel from the cached channel list that
+// satisfies the requested group+model+priority level.
+//
+// triedChannelTypes lets callers avoid re-picking channels whose Type has already
+// failed in earlier retries for the same model. When retry > 0 and the list is
+// non-empty, candidates whose Type appears in the list are excluded. If that
+// exclusion empties the candidate pool, the filter is dropped (fallback to the
+// full pool) so the function still returns a usable channel. Passing nil
+// preserves the original behavior (no type filtering).
+func GetRandomSatisfiedChannel(group string, model string, retry int, requestPath string, triedChannelTypes []int) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
 		return GetChannel(group, model, retry, requestPath)
@@ -125,6 +134,17 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 
 	if len(channels) == 0 {
 		return nil, nil
+	}
+
+	// Cross-type retry filter: when retry > 0 and we've already tried some
+	// channel Types for this request, prefer channels whose Type is not in
+	// the tried list. If filtering exhausts candidates, fall back to the
+	// unfiltered pool so the caller still gets a channel.
+	if retry > 0 && len(triedChannelTypes) > 0 {
+		filtered := filterChannelsByTriedTypes(channels, triedChannelTypes)
+		if len(filtered) > 0 {
+			channels = filtered
+		}
 	}
 
 	if len(channels) == 1 {
@@ -226,6 +246,31 @@ func filterChannelsByRequestPath(channels []int, requestPath string) []int {
 		if config := channel2advancedCustomConfig[channelId]; config != nil && config.SupportsPath(requestPath) {
 			filtered = append(filtered, channelId)
 		}
+	}
+	return filtered
+}
+
+// filterChannelsByTriedTypes excludes channels whose Type appears in
+// triedChannelTypes. Used during retry to avoid re-picking the same provider
+// type that already failed. Channels not found in channelsIDM are dropped here
+// (unlike the path filter) because we cannot verify their Type and a known-good
+// retry candidate is preferred. Caller must hold channelSyncLock (read lock).
+// The cached slice is never mutated.
+func filterChannelsByTriedTypes(channels []int, triedChannelTypes []int) []int {
+	tried := make(map[int]struct{}, len(triedChannelTypes))
+	for _, t := range triedChannelTypes {
+		tried[t] = struct{}{}
+	}
+	filtered := make([]int, 0, len(channels))
+	for _, channelId := range channels {
+		channel, ok := channelsIDM[channelId]
+		if !ok {
+			continue
+		}
+		if _, skip := tried[channel.Type]; skip {
+			continue
+		}
+		filtered = append(filtered, channelId)
 	}
 	return filtered
 }
