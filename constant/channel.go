@@ -58,7 +58,28 @@ const (
 	ChannelTypeAdvancedCustom = 58
 	ChannelTypeDummy          // this one is only for count, do not add any channel after this
 
+	// Coding Plan channel types. These share the standard OpenAI / Anthropic
+	// request formats but expose provider-specific quota probe endpoints. They
+	// are detected from the configured base URL at runtime, so a user can
+	// keep an existing OpenAI channel and just point it at a Coding Plan URL.
+	ChannelTypeKimiCodingPlan       = 60
+	ChannelTypeZhipuCodingPlan      = 61
+	ChannelTypeMiniMaxCodingPlan    = 62
+	ChannelTypeVolcengineCodingPlan = 63
+	ChannelTypeMiMoCodingPlan       = 64
+
 )
+
+// CodingPlanChannelTypes lists every channel type that may serve a Coding Plan
+// provider. Helpers in the service package consult this slice to decide
+// whether the Coding Plan quota / error handling pipeline applies.
+var CodingPlanChannelTypes = []int{
+	ChannelTypeKimiCodingPlan,
+	ChannelTypeZhipuCodingPlan,
+	ChannelTypeMiniMaxCodingPlan,
+	ChannelTypeVolcengineCodingPlan,
+	ChannelTypeMiMoCodingPlan,
+}
 
 var ChannelBaseURLs = []string{
 	"",                                    // 0
@@ -120,6 +141,12 @@ var ChannelBaseURLs = []string{
 	"https://api.replicate.com",                 //56
 	"https://chatgpt.com",                       //57
 	"",                                          //58
+	"",                                          //59 dummy
+	"https://api.kimi.com/coding",               //60
+	"https://open.bigmodel.cn",                  //61
+	"https://api.minimaxi.com",                  //62
+	"https://ark.cn-beijing.volces.com",         //63
+	"https://api.xiaomimimo.com",                //64
 }
 
 var ChannelTypeNames = map[int]string{
@@ -178,6 +205,11 @@ var ChannelTypeNames = map[int]string{
 	ChannelTypeReplicate:      "Replicate",
 	ChannelTypeCodex:          "ChatGPT Subscription (Codex)",
 	ChannelTypeAdvancedCustom: "Advanced Custom",
+	ChannelTypeKimiCodingPlan:       "Kimi Coding Plan",
+	ChannelTypeZhipuCodingPlan:      "Zhipu GLM Coding Plan",
+	ChannelTypeMiniMaxCodingPlan:    "MiniMax Coding Plan",
+	ChannelTypeVolcengineCodingPlan: "Volcengine Coding Plan",
+	ChannelTypeMiMoCodingPlan:       "MiMo Coding Plan",
 }
 
 func GetChannelTypeName(channelType int) string {
