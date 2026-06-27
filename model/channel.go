@@ -83,6 +83,10 @@ type ChannelInfo struct {
 	MultiKeyQuotaResetAt map[int]int64 `json:"multi_key_quota_reset_at,omitempty"`
 	// 临时冻结原因，key index -> reason string
 	MultiKeyTempReason map[int]string `json:"multi_key_temp_reason,omitempty"`
+	// CodingPlanQuota holds the latest snapshot of the Coding Plan subscription
+	// quota (5-hour / weekly usage). Populated by the periodic quota refresh
+	// task (PR-4) and by on-demand probes. Nil when no probe has been run yet.
+	CodingPlanQuota *CodingPlanQuotaState `json:"coding_plan_quota,omitempty"`
 }
 
 // IsKeySchedulable 检查 key 是否可调度（不处于限流/过载/临时禁用/配额冻结状态）。
