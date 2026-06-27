@@ -55,7 +55,7 @@ export function BalanceQueryDialog({
     useState<CodexUsageDialogData | null>(null)
 
   const isCodex = currentRow?.type === 57
-  const isCodingPlan = !isCodex && isQuotaAvailable(currentRow)
+  const isCodingPlan = !isCodex && currentRow != null && isQuotaAvailable(currentRow)
 
   const handleQueryCodexUsage = async () => {
     const row = currentRow
