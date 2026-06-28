@@ -503,3 +503,65 @@ func AutomaticallyUpdateChannels(frequency int) {
 		common.SysLog("channels update done")
 	}
 }
+
+// UpdateChannelQuota probes a Coding Plan channel's quota usage by base URL
+// detection (Kimi / Zhipu / MiniMax). It always reads from the live upstream
+// API rather than relying on the periodic refresh task, so the caller sees the
+// most recent usage when explicitly requesting it.
+func UpdateChannelQuota(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	channel, err := model.CacheGetChannel(id)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	baseURL := channel.GetBaseURL()
+	if baseURL == "" {
+		baseURL = constant.ChannelBaseURLs[channel.Type]
+	}
+
+	// Use the first key for non-multi-key channels. For multi-key channels,
+	// the probe is also single-shot for now; per-key quota refresh is owned
+	// by service/coding_plan_refresh.go (PR-4).
+	apiKey := channel.Key
+	if channel.ChannelInfo.IsMultiKey {
+		keys := channel.GetKeys()
+		if len(keys) == 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "渠道没有可用的 key",
+			})
+			return
+		}
+		apiKey = keys[0]
+	}
+
+	provider := service.DetectCodingPlanProviderFromBaseURL(baseURL)
+	if provider == "" {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "该渠道 baseURL 未识别为 Coding Plan 提供商",
+		})
+		return
+	}
+
+	snapshot, err := service.ProbeCodingPlanQuota(c.Request.Context(), baseURL, apiKey, provider)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"message":  "",
+		"snapshot": snapshot,
+	})
+}
