@@ -559,9 +559,63 @@ func UpdateChannelQuota(c *gin.Context) {
 		return
 	}
 
+	// Flatten snapshot into the per-key quota_info shape the frontend expects:
+	// { "<key_idx>": { used_pct, window_end, window_type } }
+	// Coding Plan quota is a single-bucket snapshot, so it maps to key index 0
+	// for single-key channels; multi-key channels get one entry per key.
+	quotaInfo := buildQuotaInfoForFrontend(channel, snapshot)
+
 	c.JSON(http.StatusOK, gin.H{
-		"success":  true,
-		"message":  "",
-		"snapshot": snapshot,
+		"success":    true,
+		"message":    "",
+		"quota_info": quotaInfo,
+		"snapshot":   snapshot,
 	})
+}
+
+func buildQuotaInfoForFrontend(channel *model.Channel, snapshot *service.CodingPlanQuotaSnapshot) map[string]gin.H {
+	result := map[string]gin.H{}
+	if snapshot == nil {
+		return result
+	}
+
+	// Prefer the five-hour window (always present), fall back to weekly if absent.
+	var usedPct *float64
+	var resetAt *time.Time
+	windowType := "5h"
+
+	if snapshot.FiveHourUsedPercent != nil {
+		usedPct = snapshot.FiveHourUsedPercent
+		resetAt = snapshot.FiveHourResetAt
+	}
+	if usedPct == nil && snapshot.WeeklyUsedPercent != nil {
+		usedPct = snapshot.WeeklyUsedPercent
+		resetAt = snapshot.WeeklyResetAt
+		windowType = "weekly"
+	}
+
+	if usedPct == nil {
+		return result
+	}
+
+	windowEnd := int64(0)
+	if resetAt != nil {
+		windowEnd = resetAt.Unix()
+	}
+
+	entry := gin.H{
+		"used_pct":    *usedPct,
+		"window_end":  windowEnd,
+		"window_type": windowType,
+	}
+
+	if channel.ChannelInfo.IsMultiKey {
+		keys := channel.GetKeys()
+		for i := 0; i < len(keys); i++ {
+			result[strconv.Itoa(i)] = entry
+		}
+	} else {
+		result["0"] = entry
+	}
+	return result
 }
