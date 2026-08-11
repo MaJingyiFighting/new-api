@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/pkg/generationdebug"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -28,6 +29,12 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	textReq, ok := info.Request.(*dto.GeneralOpenAIRequest)
 	if !ok {
 		return types.NewErrorWithStatusCode(fmt.Errorf("invalid request type, expected dto.GeneralOpenAIRequest, got %T", info.Request), types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+
+	if generationdebug.Begin(c, info.RequestId, info.IsStream) {
+		if storage, captureErr := common.GetBodyStorage(c); captureErr == nil {
+			generationdebug.CaptureInboundRequest(c, textReq, storage)
+		}
 	}
 
 	request, err := common.DeepCopy(textReq)
@@ -107,6 +114,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 				logger.LogDebug(c, "requestBody: %s", debugBytes)
 			}
 		}
+		generationdebug.CapturePassThroughUpstream(c, storage)
 		requestBody = common.NewReplayableBodyReader(storage)
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIRequest(c, info, request)
@@ -139,6 +147,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		}
 
 		logger.LogDebug(c, "text request body: %s", jsonData)
+		generationdebug.CaptureUpstreamRequest(c, jsonData)
 
 		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {
@@ -150,6 +159,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	}
 
 	var httpResp *http.Response
+	generationdebug.MarkUpstreamStart(c)
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
@@ -160,6 +170,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	if resp != nil {
 		httpResp = resp.(*http.Response)
 		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+		httpResp.Body = generationdebug.WrapResponseBody(c, httpResp.Body, info.IsStream)
 		if httpResp.StatusCode != http.StatusOK {
 			newApiErr := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
 			// reset status code 重置状态码
@@ -169,6 +180,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	}
 
 	usage, newApiErr := adaptor.DoResponse(c, httpResp, info)
+	generationdebug.MarkResponseComplete(c)
 	if newApiErr != nil {
 		// reset status code 重置状态码
 		service.ResetStatusCode(newApiErr, statusCodeMappingStr)

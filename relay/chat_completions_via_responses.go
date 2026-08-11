@@ -8,6 +8,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/generationdebug"
 	"github.com/QuantumNous/new-api/relay/channel"
 	openaichannel "github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -144,6 +145,7 @@ func relayResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, adaptor 
 		}
 	}
 
+	generationdebug.CaptureUpstreamRequest(c, jsonData)
 	body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -153,6 +155,7 @@ func relayResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, adaptor 
 	var requestBody io.Reader = body
 
 	var httpResp *http.Response
+	generationdebug.MarkUpstreamStart(c)
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
@@ -167,6 +170,7 @@ func relayResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, adaptor 
 	clientStream := info.IsStream
 	upstreamStream := isResponsesEventStreamContentType(httpResp.Header.Get("Content-Type"))
 	info.IsStream = clientStream || upstreamStream
+	httpResp.Body = generationdebug.WrapResponseBody(c, httpResp.Body, info.IsStream)
 	if httpResp.StatusCode != http.StatusOK {
 		newApiErr := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
 		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
@@ -175,6 +179,7 @@ func relayResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, adaptor 
 
 	if upstreamStream && clientStream {
 		usage, newApiErr := openaichannel.OaiResponsesToChatStreamHandler(c, info, httpResp)
+		generationdebug.MarkResponseComplete(c)
 		if newApiErr != nil {
 			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 			return nil, newApiErr
@@ -192,6 +197,7 @@ func relayResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, adaptor 
 	}
 
 	usage, newApiErr := openaichannel.OaiResponsesToChatHandler(c, info, httpResp)
+	generationdebug.MarkResponseComplete(c)
 	if newApiErr != nil {
 		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 		return nil, newApiErr
