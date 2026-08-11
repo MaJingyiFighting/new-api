@@ -20,6 +20,10 @@ For commercial licensing, please contact support@quantumnous.com
  * Type definitions for usage logs
  */
 import type { RequestRuleTrace } from '@/features/pricing/lib/billing-expr'
+import type {
+  GenerationDebugRaw,
+  GenerationDebugSummary,
+} from './components/generation-debug/types'
 import type { PolicyEvent } from '@/features/system-settings/request-policies/api'
 
 import type { UsageLog } from './data/schema'
@@ -144,6 +148,7 @@ export interface LogOtherData {
       original: number
       clamped: number
     }
+    generation_debug_raw?: GenerationDebugRaw
     // Reject / intercept reason (admin only)
     reject_reason?: string
     task_plugin?: TaskPluginInfo
@@ -153,6 +158,7 @@ export interface LogOtherData {
     upstream_task_id?: string
     node_name?: string
   }
+  generation_debug?: GenerationDebugSummary
   // Language-independent operation descriptor (audit/login logs).
   // Frontend renders localized content from action + params via i18n templates.
   op?: {
