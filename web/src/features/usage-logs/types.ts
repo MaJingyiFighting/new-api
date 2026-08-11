@@ -20,6 +20,10 @@ For commercial licensing, please contact support@quantumnous.com
  * Type definitions for usage logs
  */
 import type { RequestRuleTrace } from '@/features/pricing/lib/billing-expr'
+import type {
+  GenerationDebugRaw,
+  GenerationDebugSummary,
+} from './components/generation-debug/types'
 
 import type { UsageLog } from './data/schema'
 // ============================================================================
@@ -142,7 +146,9 @@ export interface LogOtherData {
       original: number
       clamped: number
     }
+    generation_debug_raw?: GenerationDebugRaw
   }
+  generation_debug?: GenerationDebugSummary
   // Language-independent operation descriptor (audit/login logs).
   // Frontend renders localized content from action + params via i18n templates.
   op?: {

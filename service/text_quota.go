@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/generationdebug"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -520,6 +521,14 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	if tieredBillingApplied {
 		InjectTieredBillingInfo(other, relayInfo, tieredResult)
 	}
+	generationdebug.MergeContextIntoLogOther(ctx, other, originUsage, generationdebug.LogMeta{
+		RequestID:                relayInfo.RequestId,
+		UpstreamRequestID:        ctx.GetString(common.UpstreamRequestIdKey),
+		Streaming:                relayInfo.IsStream,
+		CacheWriteTokensOverride: cacheWriteTokens,
+		Quota:                    summary.Quota,
+		QuotaPerUnit:             common.QuotaPerUnit,
+	})
 
 	attachQuotaSaturation(ctx, relayInfo, other)
 
