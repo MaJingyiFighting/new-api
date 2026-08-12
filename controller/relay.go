@@ -163,7 +163,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
-			newAPIError = channelErr
+			newAPIError = resolveChannelSelectionError(channelErr, relayInfo.LastError)
 			break
 		}
 		service.AppendUsedChannel(c, channel.Id)
@@ -291,6 +291,13 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return nil, newAPIError
 	}
 	return channel, nil
+}
+
+func resolveChannelSelectionError(channelErr, lastRelayError *types.NewAPIError) *types.NewAPIError {
+	if lastRelayError != nil {
+		return lastRelayError
+	}
+	return channelErr
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
