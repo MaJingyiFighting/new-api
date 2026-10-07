@@ -4,6 +4,15 @@ import "github.com/QuantumNous/new-api/constant"
 
 // GetEndpointTypesByChannelType 获取渠道最优先端点类型（所有的渠道都支持 OpenAI 端点）
 func GetEndpointTypesByChannelType(channelType int, modelName string) []constant.EndpointType {
+	if channelType == constant.ChannelTypeOpenAI || channelType == constant.ChannelTypeCustom {
+		switch modelName {
+		case "jev-latest", "jev-preview", "jev-1.13.0":
+			return []constant.EndpointType{constant.EndpointTypeTypeSafeDecisions}
+		}
+	}
+	if channelType == constant.ChannelTypeOpenRouter && modelName == "openai/gpt-6-luna-decisions" {
+		return []constant.EndpointType{constant.EndpointTypeOpenRouterDecisions}
+	}
 	var endpointTypes []constant.EndpointType
 	switch channelType {
 	case constant.ChannelTypeJina:
@@ -24,7 +33,7 @@ func GetEndpointTypesByChannelType(channelType int, modelName string) []constant
 		fallthrough
 	case constant.ChannelTypeGemini:
 		endpointTypes = []constant.EndpointType{constant.EndpointTypeGemini, constant.EndpointTypeOpenAI}
-	case constant.ChannelTypeOpenRouter: // OpenRouter 只支持 OpenAI 端点
+	case constant.ChannelTypeOpenRouter:
 		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI}
 	case constant.ChannelTypeXai:
 		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI, constant.EndpointTypeOpenAIResponse}

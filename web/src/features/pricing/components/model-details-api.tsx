@@ -40,6 +40,7 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useStatus } from '@/hooks/use-status'
 
+import { getEndpointTypeLabels } from '../constants'
 import {
   buildRateLimits,
   buildSupportedParameters,
@@ -109,7 +110,7 @@ function buildChatSample(lang: Lang, ctx: SampleContext): string {
       `curl ${url} \\`,
       `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
       `  -H "Content-Type: application/json" \\`,
-      `  -d '${bodyJson.replace(/\n/g, '\n     ')}'`,
+      `  -d '${bodyJson.replaceAll('\n', '\n     ')}'`,
     ].join('\n')
   }
 
@@ -177,7 +178,7 @@ function buildAnthropicSample(lang: Lang, ctx: SampleContext): string {
       `  -H "x-api-key: $${ctx.apiKeyEnv}" \\`,
       `  -H "anthropic-version: 2023-06-01" \\`,
       `  -H "Content-Type: application/json" \\`,
-      `  -d '${body.replace(/\n/g, '\n     ')}'`,
+      `  -d '${body.replaceAll('\n', '\n     ')}'`,
     ].join('\n')
   }
   if (lang === 'python') {
@@ -249,7 +250,7 @@ function buildGeminiSample(lang: Lang, ctx: SampleContext): string {
     return [
       `curl '${url}' \\`,
       `  -H 'Content-Type: application/json' \\`,
-      `  -d '${body.replace(/\n/g, '\n     ')}'`,
+      `  -d '${body.replaceAll('\n', '\n     ')}'`,
     ].join('\n')
   }
   if (lang === 'python') {
@@ -299,7 +300,7 @@ function buildEmbeddingSample(lang: Lang, ctx: SampleContext): string {
       `curl ${url} \\`,
       `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
       `  -H "Content-Type: application/json" \\`,
-      `  -d '${body.replace(/\n/g, '\n     ')}'`,
+      `  -d '${body.replaceAll('\n', '\n     ')}'`,
     ].join('\n')
   }
   if (lang === 'python') {
@@ -365,7 +366,7 @@ function buildImageSample(lang: Lang, ctx: SampleContext): string {
       `curl ${url} \\`,
       `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
       `  -H "Content-Type: application/json" \\`,
-      `  -d '${body.replace(/\n/g, '\n     ')}'`,
+      `  -d '${body.replaceAll('\n', '\n     ')}'`,
     ].join('\n')
   }
   if (lang === 'python') {
@@ -428,12 +429,90 @@ function buildSample(
   endpointType: string,
   ctx: SampleContext
 ): string {
+  if (
+    endpointType === 'typesafe-decisions' ||
+    endpointType === 'openrouter-decisions'
+  ) {
+    return buildDecisionsSample(lang, ctx)
+  }
   if (endpointType === 'anthropic') return buildAnthropicSample(lang, ctx)
   if (endpointType === 'gemini') return buildGeminiSample(lang, ctx)
-  if (endpointType === 'embeddings' || endpointType === 'jina-rerank')
+  if (endpointType === 'embeddings' || endpointType === 'jina-rerank') {
     return buildEmbeddingSample(lang, ctx)
+  }
   if (endpointType === 'image-generation') return buildImageSample(lang, ctx)
   return buildChatSample(lang, ctx)
+}
+
+function buildDecisionsSample(lang: Lang, ctx: SampleContext): string {
+  const url = `${ctx.baseUrl}${ctx.endpointPath}`
+  const pythonBody = [
+    '{',
+    `    "model": ${JSON.stringify(ctx.modelName)},`,
+    '    "state": os.environ["DECISION_STATE"],',
+    '    "questions": {',
+    '        "decision": {',
+    '            "type": "noul",',
+    '            "instructions": os.environ["DECISION_QUESTION"],',
+    '        }',
+    '    },',
+    '}',
+  ].join('\n')
+
+  if (lang === 'curl') {
+    const encodeBody = `import json, os\nprint(json.dumps(${pythonBody}))`
+    return [
+      `python3 -c '${encodeBody.replaceAll("'", "'\\''")}' | \\`,
+      `curl --fail-with-body '${url.replaceAll("'", "'\\''")}' \\`,
+      `  -H "Authorization: Bearer $${ctx.apiKeyEnv}" \\`,
+      '  -H "Content-Type: application/json" \\',
+      '  --data-binary @-',
+    ].join('\n')
+  }
+
+  if (lang === 'python') {
+    return [
+      'import json',
+      'import os',
+      'from urllib.request import Request, urlopen',
+      '',
+      `body = ${pythonBody}`,
+      'request = Request(',
+      `    ${JSON.stringify(url)},`,
+      '    data=json.dumps(body).encode(),',
+      '    headers={',
+      `        "Authorization": "Bearer " + os.environ["${ctx.apiKeyEnv}"],`,
+      '        "Content-Type": "application/json",',
+      '    },',
+      '    method="POST",',
+      ')',
+      'with urlopen(request) as response:',
+      '    print(json.load(response)["answers"])',
+    ].join('\n')
+  }
+
+  return [
+    `const response = await fetch(${JSON.stringify(url)}, {`,
+    `  method: 'POST',`,
+    '  headers: {',
+    `    Authorization: \`Bearer \${process.env.${ctx.apiKeyEnv}}\`,`,
+    `    'Content-Type': 'application/json',`,
+    '  },',
+    '  body: JSON.stringify({',
+    `    model: ${JSON.stringify(ctx.modelName)},`,
+    '    state: process.env.DECISION_STATE,',
+    '    questions: {',
+    '      decision: {',
+    `        type: 'noul',`,
+    '        instructions: process.env.DECISION_QUESTION,',
+    '      },',
+    '    },',
+    '  }),',
+    '})',
+    'if (!response.ok) throw new Error(await response.text())',
+    'const data = await response.json()',
+    'console.log(data.answers)',
+  ].join('\n')
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +525,7 @@ function CodeSamplesSection(props: {
 }) {
   const { t } = useTranslation()
   const { status } = useStatus()
+  const endpointLabels: Record<string, string> = getEndpointTypeLabels(t)
 
   const baseUrl = useMemo(() => {
     const candidate =
@@ -509,7 +589,7 @@ function CodeSamplesSection(props: {
                   value={ep.type}
                   className='h-7 px-2.5 text-xs'
                 >
-                  {ep.type}
+                  {endpointLabels[ep.type] ?? ep.type}
                 </TabsTrigger>
               ))}
             </TabsList>
@@ -538,11 +618,20 @@ function CodeSamplesSection(props: {
       </div>
 
       <p className='text-muted-foreground mt-2 text-xs'>
-        {t('Replace')}{' '}
-        <code className='bg-muted rounded px-1 py-0.5 font-mono text-[11px]'>
-          {'<YOUR_API_KEY>'}
-        </code>{' '}
-        {t('with the API key from your token settings.')}
+        {activeEndpoint.type === 'typesafe-decisions' ||
+        activeEndpoint.type === 'openrouter-decisions' ? (
+          t(
+            'Set NEW_API_KEY to your API key, DECISION_STATE to the content to evaluate, and DECISION_QUESTION to your yes/no question.'
+          )
+        ) : (
+          <>
+            {t('Replace')}{' '}
+            <code className='bg-muted rounded px-1 py-0.5 font-mono text-[11px]'>
+              {'<YOUR_API_KEY>'}
+            </code>{' '}
+            {t('with the API key from your token settings.')}
+          </>
+        )}
       </p>
     </section>
   )
@@ -762,12 +851,16 @@ export function ModelDetailsApi(props: {
   model: PricingModel
   endpointMap: Record<string, { path?: string; method?: string }>
 }) {
+  const isDecisions = props.model.supported_endpoint_types?.some(
+    (endpoint) =>
+      endpoint === 'typesafe-decisions' || endpoint === 'openrouter-decisions'
+  )
   return (
     <div className='space-y-6'>
       <CodeSamplesSection model={props.model} endpointMap={props.endpointMap} />
       <AuthSection />
-      <SupportedParametersSection model={props.model} />
-      <RateLimitsSection model={props.model} />
+      {!isDecisions && <SupportedParametersSection model={props.model} />}
+      {!isDecisions && <RateLimitsSection model={props.model} />}
     </div>
   )
 }

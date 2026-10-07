@@ -191,6 +191,11 @@ const endpointTypeOptions: Array<{ value: string; label: string }> = [
     label: 'Image Generation (/v1/images/generations)',
   },
   { value: 'embeddings', label: 'Embeddings (/v1/embeddings)' },
+  { value: 'typesafe-decisions', label: 'TypeSafe Decisions (/v1/systemone)' },
+  {
+    value: 'openrouter-decisions',
+    label: 'OpenRouter Decisions (/v1/alpha/decisions)',
+  },
 ]
 
 const STREAM_INCOMPATIBLE_ENDPOINTS = new Set([
@@ -198,6 +203,8 @@ const STREAM_INCOMPATIBLE_ENDPOINTS = new Set([
   'image-generation',
   'jina-rerank',
   'openai-response-compact',
+  'typesafe-decisions',
+  'openrouter-decisions',
 ])
 
 const MODEL_PRICE_ERROR_CODE = 'model_price_error'
@@ -405,9 +412,6 @@ function ChannelTestDialogContent({
     setPagination({ pageIndex: 0, pageSize: 30 })
   }, [])
 
-  const streamDisabled = STREAM_INCOMPATIBLE_ENDPOINTS.has(endpointType)
-  const effectiveStreamTest = !streamDisabled && isStreamTest
-
   const handleEndpointTypeChange = useCallback((value: string | null) => {
     if (value === null) return
 
@@ -442,6 +446,48 @@ function ChannelTestDialogContent({
     () => baseModels.filter((model) => !removedModels.has(model)),
     [baseModels, removedModels]
   )
+
+  const decisionEndpoints = useMemo(() => {
+    const endpoints: Record<string, string> = {}
+    let mapping: Record<string, unknown> = {}
+    try {
+      const parsed: unknown = JSON.parse(currentRow.model_mapping || '{}')
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        mapping = parsed as Record<string, unknown>
+      }
+    } catch {
+      return endpoints
+    }
+    for (const model of models) {
+      let upstreamModel = model
+      const visited = new Set<string>()
+      while (!visited.has(upstreamModel)) {
+        visited.add(upstreamModel)
+        const target = mapping[upstreamModel]
+        if (typeof target !== 'string' || target === upstreamModel) break
+        upstreamModel = target
+      }
+      if (
+        (currentRow.type === 1 || currentRow.type === 8) &&
+        ['jev-latest', 'jev-preview', 'jev-1.13.0'].includes(upstreamModel)
+      ) {
+        endpoints[model] = 'typesafe-decisions'
+      } else if (
+        currentRow.type === 20 &&
+        upstreamModel === 'openai/gpt-6-luna-decisions'
+      ) {
+        endpoints[model] = 'openrouter-decisions'
+      }
+    }
+    return endpoints
+  }, [currentRow.model_mapping, currentRow.type, models])
+
+  const streamDisabled =
+    STREAM_INCOMPATIBLE_ENDPOINTS.has(endpointType) ||
+    (endpointType === 'auto' &&
+      models.length > 0 &&
+      models.every((model) => Boolean(decisionEndpoints[model])))
+  const effectiveStreamTest = !streamDisabled && isStreamTest
 
   const successModels = useMemo(
     () => models.filter((model) => testResults[model]?.status === 'success'),
@@ -543,6 +589,8 @@ function ChannelTestDialogContent({
       markModelTesting(model, true)
       updateTestResult(model, { status: 'testing' })
       let finalResult: TestResult | undefined
+      const testEndpoint =
+        endpointType === 'auto' ? decisionEndpoints[model] : endpointType
 
       try {
         await handleTestChannel(
@@ -550,8 +598,11 @@ function ChannelTestDialogContent({
           {
             channelName: currentRow.name,
             testModel: model,
-            endpointType: endpointType === 'auto' ? undefined : endpointType,
-            stream: effectiveStreamTest || undefined,
+            endpointType: testEndpoint,
+            stream:
+              (effectiveStreamTest &&
+                !STREAM_INCOMPATIBLE_ENDPOINTS.has(testEndpoint)) ||
+              undefined,
             silent,
           },
           (success, responseTime, error, errorCode) => {
@@ -588,6 +639,7 @@ function ChannelTestDialogContent({
     },
     [
       currentRow,
+      decisionEndpoints,
       endpointType,
       effectiveStreamTest,
       markModelTesting,

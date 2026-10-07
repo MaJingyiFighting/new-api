@@ -112,6 +112,15 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
+	if info.RelayMode == relayconstant.RelayModeDecisions {
+		if info.ChannelType == constant.ChannelTypeCustom {
+			return strings.ReplaceAll(info.ChannelBaseUrl, "{model}", info.UpstreamModelName), nil
+		}
+		return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, "/v1/systemone", info.ChannelType), nil
+	}
+	if info.RelayMode == relayconstant.RelayModeOpenRouterDecisions {
+		return relaycommon.GetFullRequestURL(info.ChannelBaseUrl, "/alpha/decisions", info.ChannelType), nil
+	}
 	if info.RelayMode == relayconstant.RelayModeRealtime {
 		if after, ok := strings.CutPrefix(info.ChannelBaseUrl, "https://"); ok {
 			baseUrl := after
@@ -787,6 +796,8 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		}
 	case relayconstant.RelayModeResponsesCompact:
 		usage, err = OaiResponsesCompactionHandler(c, resp)
+	case relayconstant.RelayModeDecisions, relayconstant.RelayModeOpenRouterDecisions:
+		usage, err = OaiDecisionsHandler(c, info, resp)
 	default:
 		if info.IsStream {
 			usage, err = OaiStreamHandler(c, info, resp)

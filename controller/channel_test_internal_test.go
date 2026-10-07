@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -48,6 +49,73 @@ func TestGetChannelDefaultBaseURLsUsesBuiltInDefaults(t *testing.T) {
 	assert.NotContains(t, response.Data, constant.ChannelTypeAzure)
 	assert.NotContains(t, response.Data, constant.ChannelTypeNewAPI)
 	assert.NotContains(t, response.Data, constant.ChannelTypeTaskPlugin)
+}
+
+func TestChannelTestDecisionsUsesNativeRequestAndFinalModel(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	user := model.User{Username: "decision-tester", Quota: 1_000_000, Status: common.UserStatusEnabled, Group: "default"}
+	require.NoError(t, db.Create(&user).Error)
+	service.InitHttpClient()
+
+	for _, tc := range []struct {
+		name, model, endpoint, path, override string
+		channelType                           int
+		stream, rejected                      bool
+	}{
+		{name: "TypeSafe auto selects native request", model: "jev-latest", channelType: constant.ChannelTypeOpenAI, path: "/v1/systemone"},
+		{name: "OpenRouter auto selects native request", model: "openai/gpt-6-luna-decisions", channelType: constant.ChannelTypeOpenRouter, path: "/api/alpha/decisions"},
+		{name: "custom path uses overridden model", model: "jev-latest", channelType: constant.ChannelTypeCustom, path: "/native/jev-preview", override: `{"model":"jev-preview"}`},
+		{name: "OpenRouter rejects TypeSafe endpoint", model: "jev-latest", channelType: constant.ChannelTypeOpenRouter, endpoint: string(constant.EndpointTypeTypeSafeDecisions), rejected: true},
+		{name: "OpenAI compatible rejects OpenRouter endpoint", model: "openai/gpt-6-luna-decisions", channelType: constant.ChannelTypeOpenAI, endpoint: string(constant.EndpointTypeOpenRouterDecisions), rejected: true},
+		{name: "native streaming rejected", model: "jev-latest", channelType: constant.ChannelTypeOpenAI, stream: true, rejected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				assert.Equal(t, tc.path, r.URL.Path)
+				body, err := io.ReadAll(r.Body)
+				if !assert.NoError(t, err) {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				var request dto.DecisionsRequest
+				assert.NoError(t, common.Unmarshal(body, &request))
+				wantModel := tc.model
+				if tc.channelType == constant.ChannelTypeCustom {
+					wantModel = "jev-preview"
+				}
+				assert.Equal(t, wantModel, request.Model)
+				assert.NotEmpty(t, request.State)
+				assert.JSONEq(t, `{"damaged":{"type":"noul","instructions":"Does the customer report a damaged item?"}}`, string(request.Questions))
+				assert.NotContains(t, string(body), `"messages"`)
+				assert.NotContains(t, string(body), `"stream"`)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"answers":{"damaged":{"type":"noul","noul":0.95}},"usage":{"input_tokens":1000,"output_tokens":20}}`)
+			}))
+			t.Cleanup(server.Close)
+			baseURL := server.URL
+			if tc.channelType == constant.ChannelTypeOpenRouter {
+				baseURL += "/api"
+			}
+			channel := &model.Channel{Type: tc.channelType, Models: tc.model, Key: "test-key", BaseURL: &baseURL, Status: common.ChannelStatusEnabled}
+			if tc.channelType == constant.ChannelTypeCustom {
+				baseURL += "/native/{model}"
+				channel.ModelMapping = common.GetPointer(`{"jev-latest":"jev-1.13.0"}`)
+				channel.ParamOverride = &tc.override
+			}
+			result := testChannel(context.Background(), channel, user.Id, tc.model, tc.endpoint, tc.stream)
+			if tc.rejected {
+				require.Error(t, result.localErr)
+				assert.Equal(t, int32(0), requests.Load())
+				return
+			}
+			require.NoError(t, result.localErr)
+			require.Nil(t, result.newAPIError)
+			assert.Equal(t, int32(1), requests.Load())
+		})
+	}
 }
 
 func TestValidateChannelProxy(t *testing.T) {

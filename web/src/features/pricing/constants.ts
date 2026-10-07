@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { type TFunction } from 'i18next'
+import type { TFunction } from 'i18next'
 
 import type { TokenUnit } from './types'
 
@@ -77,6 +77,8 @@ export const ENDPOINT_TYPES = {
   IMAGE_GENERATION: 'image-generation',
   EMBEDDINGS: 'embeddings',
   OPENAI_VIDEO: 'openai-video',
+  TYPESAFE_DECISIONS: 'typesafe-decisions',
+  OPENROUTER_DECISIONS: 'openrouter-decisions',
 } as const
 
 export type EndpointTypeOption =
@@ -96,6 +98,8 @@ export function getEndpointTypeLabels(
     [ENDPOINT_TYPES.IMAGE_GENERATION]: t('Image'),
     [ENDPOINT_TYPES.EMBEDDINGS]: t('Embeddings'),
     [ENDPOINT_TYPES.OPENAI_VIDEO]: t('Video'),
+    [ENDPOINT_TYPES.TYPESAFE_DECISIONS]: t('TypeSafe Decisions'),
+    [ENDPOINT_TYPES.OPENROUTER_DECISIONS]: t('OpenRouter Decisions'),
   }
 }
 

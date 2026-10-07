@@ -109,6 +109,29 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	}
 
 	endpointType = normalizeChannelTestEndpoint(channel, endpointType)
+	if endpointType == "" && (channel.Type == constant.ChannelTypeOpenAI || channel.Type == constant.ChannelTypeCustom || channel.Type == constant.ChannelTypeOpenRouter) {
+		c.Set("model_mapping", channel.GetModelMapping())
+		mappedInfo := &relaycommon.RelayInfo{
+			OriginModelName: testModel,
+			ChannelMeta:     &relaycommon.ChannelMeta{UpstreamModelName: testModel},
+		}
+		if err := helper.ModelMappedHelper(c, mappedInfo, nil); err != nil {
+			return testResult{context: c, localErr: err, newAPIError: types.NewError(err, types.ErrorCodeChannelModelMappedError)}
+		}
+		if channel.Type == constant.ChannelTypeOpenAI || channel.Type == constant.ChannelTypeCustom {
+			switch mappedInfo.UpstreamModelName {
+			case "jev-latest", "jev-preview", "jev-1.13.0":
+				endpointType = string(constant.EndpointTypeTypeSafeDecisions)
+			}
+		}
+		if channel.Type == constant.ChannelTypeOpenRouter && mappedInfo.UpstreamModelName == "openai/gpt-6-luna-decisions" {
+			endpointType = string(constant.EndpointTypeOpenRouterDecisions)
+		}
+	}
+	if isStream && (endpointType == string(constant.EndpointTypeTypeSafeDecisions) || endpointType == string(constant.EndpointTypeOpenRouterDecisions)) {
+		err := errors.New("Decisions 模型不支持流式测试，请关闭流式选项后重试")
+		return testResult{context: c, localErr: err, newAPIError: types.NewOpenAIError(err, types.ErrorCodeBadRequestBody, http.StatusBadRequest)}
+	}
 
 	requestPath := "/v1/chat/completions"
 
@@ -188,6 +211,10 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			relayFormat = types.RelayFormatOpenAIResponses
 		case constant.EndpointTypeOpenAIResponseCompact:
 			relayFormat = types.RelayFormatOpenAIResponsesCompaction
+		case constant.EndpointTypeTypeSafeDecisions:
+			relayFormat = types.RelayFormatTypeSafeDecisions
+		case constant.EndpointTypeOpenRouterDecisions:
+			relayFormat = types.RelayFormatOpenRouterDecisions
 		case constant.EndpointTypeAnthropic:
 			relayFormat = types.RelayFormatClaude
 		case constant.EndpointTypeGemini:
@@ -352,6 +379,12 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 				newAPIError: types.NewError(errors.New("invalid response request type"), types.ErrorCodeConvertRequestFailed),
 			}
 		}
+	case relayconstant.RelayModeDecisions, relayconstant.RelayModeOpenRouterDecisions:
+		if !helper.SupportsDecisionsEndpoint(channel.Type, info.RelayMode) {
+			err := errors.New("channel does not support this decisions endpoint")
+			return testResult{context: c, localErr: err, newAPIError: types.NewOpenAIError(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest)}
+		}
+		convertedRequest = request
 	case relayconstant.RelayModeResponsesCompact:
 		// Response compaction request - convert to OpenAIResponsesRequest before adapting
 		switch req := request.(type) {
@@ -429,6 +462,18 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 				newAPIError: types.NewError(err, types.ErrorCodeChannelParamOverrideInvalid),
 			}
 		}
+	}
+	if info.RelayMode == relayconstant.RelayModeDecisions || info.RelayMode == relayconstant.RelayModeOpenRouterDecisions {
+		var decisionsRequest dto.DecisionsRequest
+		err = common.Unmarshal(jsonData, &decisionsRequest)
+		if err == nil {
+			err = helper.ValidateDecisionsRequest(&decisionsRequest, info.RelayMode)
+		}
+		if err != nil {
+			return testResult{context: c, localErr: err, newAPIError: types.NewOpenAIError(err, types.ErrorCodeBadRequestBody, http.StatusBadRequest)}
+		}
+		info.Request = &decisionsRequest
+		info.UpstreamModelName = decisionsRequest.Model
 	}
 
 	requestBody := bytes.NewBuffer(jsonData)
@@ -738,6 +783,12 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 			return &dto.OpenAIResponsesCompactionRequest{
 				Model: model,
 				Input: testResponsesInput,
+			}
+		case constant.EndpointTypeTypeSafeDecisions, constant.EndpointTypeOpenRouterDecisions:
+			return &dto.DecisionsRequest{
+				Model:     model,
+				State:     json.RawMessage(`"The package arrived with a broken screen."`),
+				Questions: json.RawMessage(`{"damaged":{"type":"noul","instructions":"Does the customer report a damaged item?"}}`),
 			}
 		case constant.EndpointTypeAnthropic:
 			return &dto.ClaudeRequest{

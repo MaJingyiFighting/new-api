@@ -115,6 +115,12 @@ func SetRelayRouter(router *gin.Engine) {
 		httpRouter.POST("/alpha/search", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatOpenAIAlphaSearch)
 		})
+		httpRouter.POST("/systemone", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatTypeSafeDecisions)
+		})
+		httpRouter.POST("/alpha/decisions", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatOpenRouterDecisions)
+		})
 
 		// image related routes. /images/generations and /images/edits are
 		// host protocol endpoints (openai_image) registered by
