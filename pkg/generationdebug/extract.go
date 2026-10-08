@@ -44,9 +44,11 @@ func ExtractPromptFromRequest(data []byte) PromptDebug {
 	if err := common.Unmarshal(data, &root); err != nil {
 		return result
 	}
-	result.Instructions = root["instructions"]
-	if result.Instructions == nil {
-		result.Instructions = root["instruction"]
+	for _, key := range []string{"instructions", "instruction", "systemInstruction", "system_instruction"} {
+		if root[key] != nil {
+			result.Instructions = root[key]
+			break
+		}
 	}
 	result.Tools = root["tools"]
 	if result.Tools == nil {
@@ -57,6 +59,9 @@ func ExtractPromptFromRequest(data []byte) PromptDebug {
 	if messages, ok := root["messages"].([]any); ok {
 		result.Messages = extractMessages(messages)
 		result.Units = appendMessageUnits(result.Units, "messages", messages)
+	} else if contents, ok := root["contents"].([]any); ok {
+		result.Messages = extractMessages(contents)
+		result.Units = appendMessageUnits(result.Units, "contents", contents)
 	} else if inputs, ok := root["input"].([]any); ok {
 		result.Messages = extractMessages(inputs)
 		result.Units = appendMessageUnits(result.Units, "input", inputs)
@@ -146,6 +151,7 @@ func ExtractOutputFromRawResponse(data []byte) ExtractedOutput {
 	if outputs, ok := root["output"].([]any); ok {
 		result.Output += extractResponsesOutput(outputs)
 	}
+	appendGeminiOutput(&result, root)
 	if result.FinishReason == "" {
 		result.FinishReason = responseFinishReason(root)
 	}
@@ -201,8 +207,41 @@ func ExtractOutputFromSSE(data []byte) ExtractedOutput {
 				}
 			}
 		}
+		appendGeminiOutput(&result, root)
 	}
 	return result
+}
+
+func appendGeminiOutput(result *ExtractedOutput, root map[string]any) {
+	result.GenerationID = firstNonEmpty(result.GenerationID, stringValue(root["responseId"]))
+	candidates, _ := root["candidates"].([]any)
+	var output, reasoning strings.Builder
+	for _, value := range candidates {
+		candidate, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		result.FinishReason = firstNonEmpty(result.FinishReason, stringValue(candidate["finishReason"]))
+		content, _ := candidate["content"].(map[string]any)
+		parts, _ := content["parts"].([]any)
+		for _, value := range parts {
+			part, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			text := contentText(part["text"])
+			if thought, _ := part["thought"].(bool); thought {
+				reasoning.WriteString(text)
+			} else {
+				output.WriteString(text)
+			}
+		}
+	}
+	result.Output += output.String()
+	result.Reasoning += reasoning.String()
+	if feedback, ok := root["promptFeedback"].(map[string]any); ok {
+		result.FinishReason = firstNonEmpty(result.FinishReason, stringValue(feedback["blockReason"]))
+	}
 }
 
 func extractMessages(values []any) []PromptMessage {
@@ -215,10 +254,15 @@ func extractMessages(values []any) []PromptMessage {
 		role := stringValue(message["role"])
 		if role == "" {
 			role = "user"
+		} else if role == "model" {
+			role = "assistant"
 		}
 		content := contentText(message["content"])
 		if content == "" {
 			content = contentText(message["text"])
+		}
+		if content == "" {
+			content = contentText(message["parts"])
 		}
 		cached := containsCacheMarker(message)
 		messages = append(messages, newPromptMessage(role, content, cached, len(messages)))
@@ -230,6 +274,12 @@ func appendRootUnits(units []PromptUnit, root map[string]any) []PromptUnit {
 	for _, key := range []string{"instructions", "instruction", "system", "developer"} {
 		if value, ok := root[key]; ok && value != nil {
 			units = appendValueUnit(units, key, key, "text", value, -1)
+		}
+	}
+	for _, key := range []string{"systemInstruction", "system_instruction"} {
+		if instruction, ok := root[key].(map[string]any); ok {
+			units = appendContentUnits(units, key+".parts", "system", instruction["parts"], -1)
+			break
 		}
 	}
 	for _, key := range []string{"tools", "functions"} {
@@ -256,9 +306,15 @@ func appendMessageUnits(units []PromptUnit, basePath string, values []any) []Pro
 		role := stringValue(message["role"])
 		if role == "" {
 			role = "user"
+		} else if role == "model" {
+			role = "assistant"
 		}
 		if content, ok := message["content"]; ok {
 			units = appendContentUnits(units, fmt.Sprintf("%s[%d].content", basePath, messageIndex), role, content, messageIndex)
+			continue
+		}
+		if parts, ok := message["parts"]; ok {
+			units = appendContentUnits(units, fmt.Sprintf("%s[%d].parts", basePath, messageIndex), role, parts, messageIndex)
 			continue
 		}
 		if text, ok := message["text"]; ok {
@@ -453,7 +509,7 @@ func contentText(value any) string {
 		}
 		return strings.Join(parts, "\n")
 	case map[string]any:
-		for _, key := range []string{"text", "content", "input_text", "output_text"} {
+		for _, key := range []string{"text", "content", "input_text", "output_text", "parts"} {
 			if text := contentText(typed[key]); text != "" {
 				return text
 			}
