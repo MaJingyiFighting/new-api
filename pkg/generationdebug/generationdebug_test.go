@@ -51,6 +51,94 @@ func TestSanitizeUnstructuredSummarizesTruncatedBase64(t *testing.T) {
 	assert.Contains(t, sanitized, "[OMITTED type=truncated_string")
 }
 
+func TestExtractClaudePrompt(t *testing.T) {
+	body := `{"model":"claude-test","system":"Be brief.","messages":[` +
+		`{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}},{"type":"image","source":{"type":"base64","data":"AAAA"}}]},` +
+		`{"role":"assistant","content":"Hi there"}],"tools":[{"name":"lookup"}]}`
+
+	prompt := ExtractPromptFromRequest([]byte(body))
+
+	require.Len(t, prompt.Messages, 2)
+	assert.Equal(t, "user", prompt.Messages[0].Role)
+	assert.Contains(t, prompt.Messages[0].Content, "hello")
+	assert.True(t, prompt.Messages[0].Cached)
+	assert.Equal(t, "assistant", prompt.Messages[1].Role)
+	assert.Equal(t, "Hi there", prompt.Messages[1].Content)
+	require.NotNil(t, prompt.Instructions)
+	assert.Equal(t, "Be brief.", prompt.Instructions)
+	require.NotNil(t, prompt.Tools)
+	require.Len(t, prompt.Units, 5)
+	assert.Equal(t, "system", prompt.Units[0].Path)
+	assert.Equal(t, "Be brief.", prompt.Units[0].Content)
+	assert.Equal(t, "tools", prompt.Units[1].Path)
+	assert.Equal(t, "messages[0].content[0].text", prompt.Units[2].Path)
+	assert.Equal(t, "image", prompt.Units[3].Kind)
+	assert.Equal(t, "messages[1].content", prompt.Units[4].Path)
+	assert.Greater(t, prompt.TotalEstimatedTokens, 0)
+}
+
+func TestExtractClaudeOutput(t *testing.T) {
+	t.Run("JSON separates thinking from the answer", func(t *testing.T) {
+		body := `{"id":"msg-1","type":"message","role":"assistant","content":[` +
+			`{"type":"thinking","thinking":"Think first."},{"type":"text","text":"Hello world"}],` +
+			`"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":3}}`
+
+		output := ExtractOutputFromRawResponse([]byte(body))
+
+		assert.Equal(t, ExtractedOutput{
+			Output: "Hello world", Reasoning: "Think first.",
+			FinishReason: "end_turn", GenerationID: "msg-1",
+		}, output)
+	})
+
+	t.Run("SSE joins deltas across events", func(t *testing.T) {
+		body := "event: message_start\n" +
+			`data: {"type":"message_start","message":{"id":"msg-1","type":"message","content":[]}}` + "\n\n" +
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Think first."}}` + "\n\n" +
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hello "}}` + "\n\n" +
+			`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"world"}}` + "\n\n" +
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}` + "\n\n" +
+			`data: {"type":"message_stop"}` + "\n\n"
+
+		output := ExtractOutputFromSSE([]byte(body))
+
+		assert.Equal(t, ExtractedOutput{
+			Output: "Hello world", Reasoning: "Think first.",
+			FinishReason: "end_turn", GenerationID: "msg-1",
+		}, output)
+	})
+
+	t.Run("non-Claude JSON keeps other fields untouched", func(t *testing.T) {
+		body := `{"id":"chatcmpl-1","choices":[{"message":{"content":"plain"}}]}`
+
+		output := ExtractOutputFromRawResponse([]byte(body))
+
+		assert.Equal(t, "plain", output.Output)
+		assert.Empty(t, output.Reasoning)
+	})
+}
+
+func TestExtractDecisionsPromptAndOutput(t *testing.T) {
+	body := `{"model":"jev-latest","stream":false,` +
+		`"state":{"ticket":{"id":1}},"questions":{"damaged":{"type":"noul","instructions":"Is it broken?"}}}`
+
+	prompt := ExtractPromptFromRequest([]byte(body))
+
+	require.Len(t, prompt.Units, 2)
+	assert.Equal(t, "state", prompt.Units[0].Path)
+	assert.Equal(t, "state", prompt.Units[0].Kind)
+	assert.Contains(t, prompt.Units[0].Content, "ticket")
+	assert.Equal(t, "questions", prompt.Units[1].Path)
+	assert.Equal(t, "questions", prompt.Units[1].Kind)
+	assert.Contains(t, prompt.Units[1].Content, "damaged")
+	assert.Greater(t, prompt.TotalEstimatedTokens, 0)
+
+	output := ExtractOutputFromRawResponse([]byte(
+		`{"model":"jev-latest","answers":{"damaged":{"type":"noul","noul":0.95}},"usage":{"input_tokens":1,"output_tokens":1}}`))
+
+	assert.Contains(t, output.Output, `"noul":0.95`)
+}
+
 func TestPromptUnitKeepsFullContentForSelectedField(t *testing.T) {
 	longContent := strings.Repeat("prompt-", 80)
 	requestJSON := `{"messages":[{"role":"user","content":"` + longContent + `"}]}`

@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/generationdebug"
 	openaichannel "github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -393,4 +394,91 @@ func TestDecisionsPricingPreservesAdministratorOverrides(t *testing.T) {
 			assert.Equal(t, tc.want, quota)
 		})
 	}
+}
+
+func TestDecisionsGenerationDebugRelay(t *testing.T) {
+	t.Setenv("GENERATION_DEBUG_ENABLED", "true")
+	t.Setenv("GENERATION_DEBUG_CAPTURE_RAW", "true")
+	t.Setenv("GENERATION_DEBUG_CAPTURE_OUTPUT", "true")
+	t.Setenv("GENERATION_DEBUG_USER_VISIBLE", "true")
+	t.Setenv("GENERATION_DEBUG_SAMPLE_RATE", "1")
+	t.Setenv("GENERATION_DEBUG_MAX_BYTES", "4096")
+	gin.SetMode(gin.TestMode)
+	db := setupDecisionsBilling(t)
+	service.InitHttpClient()
+	user := model.User{Username: "decisions-debug", AffCode: "decisions-debug", Status: common.UserStatusEnabled}
+	channel := model.Channel{Name: "decisions-debug", Type: constant.ChannelTypeOpenAI, Key: "fixture-key", Status: common.ChannelStatusEnabled}
+	require.NoError(t, db.Create(&user).Error)
+	require.NoError(t, db.Create(&channel).Error)
+
+	const state = `{"ticket":{"id":7,"api_key":"redaction-fixture"}}`
+	const questions = `{"damaged":{"type":"noul","instructions":"Is it broken?"}}`
+	const responseBody = `{"model":"jev-latest","answers":{"damaged":{"type":"noul","noul":0.95}},"usage":{"input_tokens":1000,"output_tokens":20,"total_tokens":1020}}`
+	received := make(chan []byte, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		received <- body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, responseBody)
+	}))
+	t.Cleanup(upstream.Close)
+
+	body := `{"model":"jev-latest","state":` + state + `,"questions":` + questions + `,"stream":false}`
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/systemone", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	t.Cleanup(func() { common.CleanupBodyStorage(ctx) })
+	ctx.Set(common.RequestIdKey, "decisions-debug-1")
+	common.SetContextKey(ctx, constant.ContextKeyChannelType, constant.ChannelTypeOpenAI)
+	common.SetContextKey(ctx, constant.ContextKeyChannelId, channel.Id)
+	common.SetContextKey(ctx, constant.ContextKeyChannelBaseUrl, upstream.URL)
+	common.SetContextKey(ctx, constant.ContextKeyChannelKey, "fixture-key")
+	common.SetContextKey(ctx, constant.ContextKeyOriginalModel, "jev-latest")
+	common.SetContextKey(ctx, constant.ContextKeyUserId, user.Id)
+	request, err := helper.GetAndValidateRequest(ctx, types.RelayFormatTypeSafeDecisions)
+	require.NoError(t, err)
+	info, err := relaycommon.GenRelayInfo(ctx, types.RelayFormatTypeSafeDecisions, request, nil)
+	require.NoError(t, err)
+	require.Nil(t, DecisionsHelper(ctx, info))
+	require.Len(t, received, 1)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, responseBody, recorder.Body.String())
+
+	var log model.Log
+	require.NoError(t, db.Where("request_id = ?", "decisions-debug-1").First(&log).Error)
+	assert.Equal(t, 1000, log.PromptTokens)
+	assert.Equal(t, 20, log.CompletionTokens)
+	var details struct {
+		Summary *generationdebug.Summary `json:"generation_debug"`
+		Admin   struct {
+			Raw *generationdebug.RawDebug `json:"generation_debug_raw"`
+		} `json:"admin_info"`
+	}
+	require.NoError(t, common.UnmarshalJsonStr(log.Other, &details))
+	require.NotNil(t, details.Summary)
+	require.NotNil(t, details.Summary.Prompt)
+	require.NotNil(t, details.Summary.Completion)
+	assert.Equal(t, "decisions-debug-1", details.Summary.RequestID)
+	assert.False(t, details.Summary.Streaming)
+	require.Len(t, details.Summary.Prompt.UpstreamUnits, 2)
+	assert.Equal(t, "state", details.Summary.Prompt.UpstreamUnits[0].Path)
+	assert.Contains(t, details.Summary.Prompt.UpstreamUnits[0].Content, "ticket")
+	assert.Equal(t, "questions", details.Summary.Prompt.UpstreamUnits[1].Path)
+	assert.Contains(t, details.Summary.Prompt.UpstreamUnits[1].Content, "damaged")
+	assert.Contains(t, details.Summary.Completion.NormalizedOutput, `"noul":0.95`)
+	raw := details.Admin.Raw
+	require.NotNil(t, raw)
+	require.NotNil(t, raw.InboundRequest)
+	require.NotNil(t, raw.UpstreamRequest)
+	require.NotNil(t, raw.RawResponse)
+	assert.Nil(t, raw.RawStream)
+	assert.NotContains(t, log.Other, "redaction-fixture")
+	capturedResponse, err := common.Marshal(raw.RawResponse.Value)
+	require.NoError(t, err)
+	assert.JSONEq(t, responseBody, string(capturedResponse))
 }

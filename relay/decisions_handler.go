@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/pkg/generationdebug"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -22,6 +23,11 @@ func DecisionsHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIE
 	request, ok := info.Request.(*dto.DecisionsRequest)
 	if !ok {
 		return types.NewError(errors.New("invalid decisions request"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	}
+	if generationdebug.Begin(c, info.RequestId, info.IsStream) {
+		if storage, captureErr := common.GetBodyStorage(c); captureErr == nil {
+			generationdebug.CaptureInboundRequest(c, request, storage)
+		}
 	}
 	// Each retry starts from the original request, including the original model.
 	upstreamRequest := *request
@@ -54,11 +60,13 @@ func DecisionsHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIE
 		return types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
 	}
 	adaptor.Init(info)
+	generationdebug.CaptureUpstreamRequest(c, body)
 	requestBody, closer, err := relaycommon.NewOutboundJSONBody(body)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 	}
 	defer closer.Close()
+	generationdebug.MarkUpstreamStart(c)
 	response, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusBadGateway)
@@ -67,12 +75,14 @@ func DecisionsHelper(c *gin.Context, info *relaycommon.RelayInfo) *types.NewAPIE
 	if !ok || httpResponse == nil {
 		return types.NewOpenAIError(errors.New("invalid decisions response"), types.ErrorCodeBadResponse, http.StatusBadGateway)
 	}
+	httpResponse.Body = generationdebug.WrapResponseBody(c, httpResponse.Body, false)
 	if httpResponse.StatusCode != http.StatusOK {
 		apiErr := service.RelayErrorHandler(c.Request.Context(), httpResponse, false)
 		service.ResetStatusCode(apiErr, c.GetString("status_code_mapping"))
 		return apiErr
 	}
 	usage, apiErr := adaptor.DoResponse(c, httpResponse, info)
+	generationdebug.MarkResponseComplete(c)
 	if apiErr != nil {
 		service.ResetStatusCode(apiErr, c.GetString("status_code_mapping"))
 		return apiErr

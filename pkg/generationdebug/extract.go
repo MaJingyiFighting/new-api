@@ -44,7 +44,7 @@ func ExtractPromptFromRequest(data []byte) PromptDebug {
 	if err := common.Unmarshal(data, &root); err != nil {
 		return result
 	}
-	for _, key := range []string{"instructions", "instruction", "systemInstruction", "system_instruction"} {
+	for _, key := range []string{"instructions", "instruction", "system", "systemInstruction", "system_instruction"} {
 		if root[key] != nil {
 			result.Instructions = root[key]
 			break
@@ -152,6 +152,10 @@ func ExtractOutputFromRawResponse(data []byte) ExtractedOutput {
 		result.Output += extractResponsesOutput(outputs)
 	}
 	appendGeminiOutput(&result, root)
+	appendClaudeOutput(&result, root)
+	if answers, ok := root["answers"]; ok && answers != nil {
+		result.Output += contentText(answers)
+	}
 	if result.FinishReason == "" {
 		result.FinishReason = responseFinishReason(root)
 	}
@@ -190,6 +194,23 @@ func ExtractOutputFromSSE(data []byte) ExtractedOutput {
 				}
 				result.FinishReason = firstNonEmpty(result.FinishReason, responseFinishReason(response))
 			}
+		case "message_start":
+			if message, ok := root["message"].(map[string]any); ok {
+				result.GenerationID = firstNonEmpty(result.GenerationID, stringValue(message["id"]))
+			}
+		case "content_block_delta":
+			if delta, ok := root["delta"].(map[string]any); ok {
+				switch stringValue(delta["type"]) {
+				case "thinking_delta":
+					result.Reasoning += stringValue(delta["thinking"])
+				default:
+					result.Output += stringValue(delta["text"])
+				}
+			}
+		case "message_delta":
+			if delta, ok := root["delta"].(map[string]any); ok {
+				result.FinishReason = firstNonEmpty(result.FinishReason, stringValue(delta["stop_reason"]))
+			}
 		}
 		if choices, ok := root["choices"].([]any); ok {
 			for _, choiceValue := range choices {
@@ -210,6 +231,28 @@ func ExtractOutputFromSSE(data []byte) ExtractedOutput {
 		appendGeminiOutput(&result, root)
 	}
 	return result
+}
+
+func appendClaudeOutput(result *ExtractedOutput, root map[string]any) {
+	if stringValue(root["type"]) != "message" {
+		return
+	}
+	blocks, _ := root["content"].([]any)
+	var output, reasoning strings.Builder
+	for _, value := range blocks {
+		block, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if stringValue(block["type"]) == "thinking" {
+			reasoning.WriteString(contentText(block["thinking"]))
+		} else {
+			output.WriteString(contentText(block["text"]))
+		}
+	}
+	result.Output += output.String()
+	result.Reasoning += reasoning.String()
+	result.FinishReason = firstNonEmpty(result.FinishReason, stringValue(root["stop_reason"]))
 }
 
 func appendGeminiOutput(result *ExtractedOutput, root map[string]any) {
@@ -274,6 +317,11 @@ func appendRootUnits(units []PromptUnit, root map[string]any) []PromptUnit {
 	for _, key := range []string{"instructions", "instruction", "system", "developer"} {
 		if value, ok := root[key]; ok && value != nil {
 			units = appendValueUnit(units, key, key, "text", value, -1)
+		}
+	}
+	for _, key := range []string{"state", "questions"} {
+		if value, ok := root[key]; ok && value != nil {
+			units = appendValueUnit(units, key, "", key, value, -1)
 		}
 	}
 	for _, key := range []string{"systemInstruction", "system_instruction"} {
