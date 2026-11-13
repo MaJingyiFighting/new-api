@@ -1,0 +1,729 @@
+package generationdebug
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"math"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+)
+
+func BuildCacheStatsFromUsage(usage *dto.Usage) CacheStats {
+	if usage == nil {
+		return CacheStats{}
+	}
+	cachedTokens := max(
+		usage.PromptTokensDetails.CachedTokens,
+		usage.PromptCacheHitTokens,
+	)
+	if usage.InputTokensDetails != nil {
+		cachedTokens = max(cachedTokens, usage.InputTokensDetails.CachedTokens)
+	}
+	cacheWriteTokens := usage.PromptTokensDetails.CachedCreationTokens
+	splitCacheWriteTokens := usage.ClaudeCacheCreation5mTokens + usage.ClaudeCacheCreation1hTokens
+	if splitCacheWriteTokens > cacheWriteTokens {
+		cacheWriteTokens = splitCacheWriteTokens
+	}
+	return CacheStats{
+		CachedTokens:     cachedTokens,
+		CacheWriteTokens: cacheWriteTokens,
+		CacheHitRate:     float64(cachedTokens) / float64(max(usage.PromptTokens, 1)),
+	}
+}
+
+func ExtractPromptFromRequest(data []byte) PromptDebug {
+	result := PromptDebug{
+		RoleCounts: make(map[string]int),
+		Estimated:  true,
+	}
+	var root map[string]any
+	if err := common.Unmarshal(data, &root); err != nil {
+		return result
+	}
+	for _, key := range []string{"instructions", "instruction", "system", "systemInstruction", "system_instruction"} {
+		if root[key] != nil {
+			result.Instructions = sanitizeValue(root[key], key)
+			break
+		}
+	}
+	result.Tools = sanitizeValue(root["tools"], "tools")
+	if result.Tools == nil {
+		result.Tools = sanitizeValue(root["functions"], "functions")
+	}
+	result.Units = appendRootUnits(result.Units, root)
+
+	if messages, ok := root["messages"].([]any); ok {
+		result.Messages = extractMessages(messages)
+		result.Units = appendMessageUnits(result.Units, "messages", messages)
+	} else if contents, ok := root["contents"].([]any); ok {
+		result.Messages = extractMessages(contents)
+		result.Units = appendMessageUnits(result.Units, "contents", contents)
+	} else if inputs, ok := root["input"].([]any); ok {
+		result.Messages = extractMessages(inputs)
+		result.Units = appendMessageUnits(result.Units, "input", inputs)
+	} else if input, ok := root["input"].(string); ok {
+		result.Messages = []PromptMessage{newPromptMessage("user", input, false, 0)}
+		result.Units = appendTextUnit(result.Units, "input", "user", "text", input, 0)
+	} else if prompt, ok := root["prompt"].(string); ok {
+		result.Messages = []PromptMessage{newPromptMessage("user", prompt, false, 0)}
+		result.Units = appendTextUnit(result.Units, "prompt", "user", "text", prompt, 0)
+	}
+	for _, message := range result.Messages {
+		result.RoleCounts[message.Role]++
+		result.TotalEstimatedTokens += message.EstimatedTokens
+	}
+	if len(result.Messages) == 0 {
+		for _, unit := range result.Units {
+			if unit.Role != "" {
+				result.RoleCounts[unit.Role]++
+			}
+		}
+	}
+	if result.Instructions != nil {
+		result.TotalEstimatedTokens += estimateTokens(contentText(result.Instructions))
+	}
+	if result.Tools != nil {
+		result.TotalEstimatedTokens += estimateTokens(contentText(result.Tools))
+	}
+	result.Units = finalizePromptUnits(result.Units)
+	if len(result.Units) > 0 {
+		result.TotalEstimatedTokens = result.Units[len(result.Units)-1].CumulativeEnd
+	}
+	return result
+}
+
+func ApplyPromptAccounting(prompt *PromptDebug, usage *dto.Usage, cache CacheStats, cacheWriteSource, cacheWriteConfidence string) {
+	if prompt == nil {
+		return
+	}
+	source := "local_estimate"
+	confidence := "estimated"
+	promptTokens := prompt.TotalEstimatedTokens
+	completionTokens := 0
+	if usage != nil {
+		source = "provider_usage"
+		confidence = "exact"
+		promptTokens = usage.PromptTokens
+		completionTokens = usage.CompletionTokens
+	}
+	if cacheWriteSource == "" {
+		cacheWriteSource = source
+	}
+	if cacheWriteConfidence == "" {
+		cacheWriteConfidence = confidence
+	}
+	prompt.TokenAccounting = &PromptTokenAccounting{
+		PromptTokens:         promptTokens,
+		CachedTokens:         cache.CachedTokens,
+		CacheWriteTokens:     cache.CacheWriteTokens,
+		CompletionTokens:     completionTokens,
+		Source:               source,
+		Confidence:           confidence,
+		CacheWriteSource:     cacheWriteSource,
+		CacheWriteConfidence: cacheWriteConfidence,
+	}
+	applyCacheBoundary(prompt, cache.CachedTokens, promptTokens)
+}
+
+func ExtractOutputFromRawResponse(data []byte) ExtractedOutput {
+	var root map[string]any
+	if err := common.Unmarshal(data, &root); err != nil {
+		return ExtractedOutput{}
+	}
+	result := ExtractedOutput{
+		GenerationID: stringValue(root["id"]),
+	}
+	if choices, ok := root["choices"].([]any); ok {
+		for _, choiceValue := range choices {
+			choice, ok := choiceValue.(map[string]any)
+			if !ok {
+				continue
+			}
+			result.FinishReason = firstNonEmpty(result.FinishReason, stringValue(choice["finish_reason"]))
+			if message, ok := choice["message"].(map[string]any); ok {
+				result.Output += contentText(message["content"])
+				result.Reasoning += firstNonEmpty(
+					contentText(message["reasoning_content"]),
+					contentText(message["reasoning"]),
+				)
+			} else {
+				result.Output += contentText(choice["text"])
+			}
+		}
+	}
+	if outputs, ok := root["output"].([]any); ok {
+		result.Output += extractResponsesOutput(outputs)
+	}
+	appendGeminiOutput(&result, root)
+	appendClaudeOutput(&result, root)
+	if answers, ok := root["answers"]; ok && answers != nil {
+		if sanitized, err := common.Marshal(sanitizeValue(answers, "answers")); err == nil {
+			result.Output += string(sanitized)
+		}
+	}
+	if result.FinishReason == "" {
+		result.FinishReason = responseFinishReason(root)
+	}
+	return result
+}
+
+func ExtractOutputFromSSE(data []byte) ExtractedOutput {
+	var result ExtractedOutput
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 64<<10), max(len(data), 64<<10))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var root map[string]any
+		if err := common.UnmarshalJsonStr(payload, &root); err != nil {
+			continue
+		}
+		result.GenerationID = firstNonEmpty(result.GenerationID, stringValue(root["id"]))
+		eventType := stringValue(root["type"])
+		switch eventType {
+		case "response.output_text.delta":
+			result.Output += stringValue(root["delta"])
+		case "response.reasoning_summary_text.delta":
+			result.Reasoning += stringValue(root["delta"])
+		case "response.completed", "response.incomplete":
+			if response, ok := root["response"].(map[string]any); ok {
+				result.GenerationID = firstNonEmpty(result.GenerationID, stringValue(response["id"]))
+				if outputs, ok := response["output"].([]any); ok && result.Output == "" {
+					result.Output = extractResponsesOutput(outputs)
+				}
+				result.FinishReason = firstNonEmpty(result.FinishReason, responseFinishReason(response))
+			}
+		case "message_start":
+			if message, ok := root["message"].(map[string]any); ok {
+				result.GenerationID = firstNonEmpty(result.GenerationID, stringValue(message["id"]))
+			}
+		case "content_block_delta":
+			if delta, ok := root["delta"].(map[string]any); ok {
+				switch stringValue(delta["type"]) {
+				case "thinking_delta":
+					result.Reasoning += stringValue(delta["thinking"])
+				default:
+					result.Output += stringValue(delta["text"])
+				}
+			}
+		case "message_delta":
+			if delta, ok := root["delta"].(map[string]any); ok {
+				result.FinishReason = firstNonEmpty(result.FinishReason, stringValue(delta["stop_reason"]))
+			}
+		}
+		if choices, ok := root["choices"].([]any); ok {
+			for _, choiceValue := range choices {
+				choice, ok := choiceValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				result.FinishReason = firstNonEmpty(result.FinishReason, stringValue(choice["finish_reason"]))
+				if delta, ok := choice["delta"].(map[string]any); ok {
+					result.Output += contentText(delta["content"])
+					result.Reasoning += firstNonEmpty(
+						contentText(delta["reasoning_content"]),
+						contentText(delta["reasoning"]),
+					)
+				}
+			}
+		}
+		appendGeminiOutput(&result, root)
+	}
+	return result
+}
+
+func appendClaudeOutput(result *ExtractedOutput, root map[string]any) {
+	if stringValue(root["type"]) != "message" {
+		return
+	}
+	blocks, _ := root["content"].([]any)
+	var output, reasoning strings.Builder
+	for _, value := range blocks {
+		block, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if stringValue(block["type"]) == "thinking" {
+			reasoning.WriteString(contentText(block["thinking"]))
+		} else {
+			output.WriteString(contentText(block["text"]))
+		}
+	}
+	result.Output += output.String()
+	result.Reasoning += reasoning.String()
+	result.FinishReason = firstNonEmpty(result.FinishReason, stringValue(root["stop_reason"]))
+}
+
+func appendGeminiOutput(result *ExtractedOutput, root map[string]any) {
+	result.GenerationID = firstNonEmpty(result.GenerationID, stringValue(root["responseId"]))
+	candidates, _ := root["candidates"].([]any)
+	var output, reasoning strings.Builder
+	for _, value := range candidates {
+		candidate, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		result.FinishReason = firstNonEmpty(result.FinishReason, stringValue(candidate["finishReason"]))
+		content, _ := candidate["content"].(map[string]any)
+		parts, _ := content["parts"].([]any)
+		for _, value := range parts {
+			part, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			text := contentText(part["text"])
+			if thought, _ := part["thought"].(bool); thought {
+				reasoning.WriteString(text)
+			} else {
+				output.WriteString(text)
+			}
+		}
+	}
+	result.Output += output.String()
+	result.Reasoning += reasoning.String()
+	if feedback, ok := root["promptFeedback"].(map[string]any); ok {
+		result.FinishReason = firstNonEmpty(result.FinishReason, stringValue(feedback["blockReason"]))
+	}
+}
+
+func extractMessages(values []any) []PromptMessage {
+	messages := make([]PromptMessage, 0, len(values))
+	for _, value := range values {
+		message, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		role := stringValue(message["role"])
+		if role == "" {
+			role = "user"
+		} else if role == "model" {
+			role = "assistant"
+		}
+		content := message["content"]
+		if promptText(content) == "" {
+			content = message["text"]
+		}
+		if promptText(content) == "" {
+			content = message["parts"]
+		}
+		cached := containsCacheMarker(message)
+		messages = append(messages, newPromptMessage(role, content, cached, len(messages)))
+	}
+	return messages
+}
+
+func appendRootUnits(units []PromptUnit, root map[string]any) []PromptUnit {
+	for _, key := range []string{"instructions", "instruction", "system", "developer"} {
+		if value, ok := root[key]; ok && value != nil {
+			units = appendValueUnit(units, key, key, "text", value, -1)
+		}
+	}
+	for _, key := range []string{"state", "questions"} {
+		if value, ok := root[key]; ok && value != nil {
+			units = appendValueUnit(units, key, "user", key, value, -1)
+		}
+	}
+	for _, key := range []string{"systemInstruction", "system_instruction"} {
+		if instruction, ok := root[key].(map[string]any); ok {
+			units = appendContentUnits(units, key+".parts", "system", instruction["parts"], -1)
+			break
+		}
+	}
+	for _, key := range []string{"tools", "functions"} {
+		if value, ok := root[key]; ok && value != nil {
+			units = appendValueUnit(units, key, "", "tool_schema", value, -1)
+		}
+	}
+	if value, ok := root["tool_choice"]; ok && value != nil {
+		units = appendValueUnit(units, "tool_choice", "", "tool_choice", value, -1)
+	}
+	if value, ok := root["response_format"]; ok && value != nil {
+		units = appendValueUnit(units, "response_format", "", "response_format", value, -1)
+	}
+	return units
+}
+
+func appendMessageUnits(units []PromptUnit, basePath string, values []any) []PromptUnit {
+	for messageIndex, value := range values {
+		message, ok := value.(map[string]any)
+		if !ok {
+			units = appendValueUnit(units, fmt.Sprintf("%s[%d]", basePath, messageIndex), "user", "text", value, messageIndex)
+			continue
+		}
+		role := stringValue(message["role"])
+		if role == "" {
+			role = "user"
+		} else if role == "model" {
+			role = "assistant"
+		}
+		if content, ok := message["content"]; ok {
+			units = appendContentUnits(units, fmt.Sprintf("%s[%d].content", basePath, messageIndex), role, content, messageIndex)
+			continue
+		}
+		if parts, ok := message["parts"]; ok {
+			units = appendContentUnits(units, fmt.Sprintf("%s[%d].parts", basePath, messageIndex), role, parts, messageIndex)
+			continue
+		}
+		if text, ok := message["text"]; ok {
+			units = appendContentUnits(units, fmt.Sprintf("%s[%d].text", basePath, messageIndex), role, text, messageIndex)
+			continue
+		}
+		units = appendValueUnit(units, fmt.Sprintf("%s[%d]", basePath, messageIndex), role, "metadata", message, messageIndex)
+	}
+	return units
+}
+
+func appendContentUnits(units []PromptUnit, path, role string, value any, messageIndex int) []PromptUnit {
+	switch typed := value.(type) {
+	case string:
+		return appendTextUnit(units, path, role, "text", typed, messageIndex)
+	case []any:
+		for partIndex, part := range typed {
+			partPath := fmt.Sprintf("%s[%d]", path, partIndex)
+			partKind := "text"
+			partContent := part
+			if partMap, ok := part.(map[string]any); ok {
+				partType := stringValue(partMap["type"])
+				if partType != "" {
+					partKind = partType
+				}
+				for _, key := range []string{"text", "input_text", "content"} {
+					if text := promptText(partMap[key]); text != "" {
+						partContent = partMap[key]
+						partPath = fmt.Sprintf("%s.%s", partPath, key)
+						break
+					}
+				}
+			}
+			units = appendValueUnit(units, partPath, role, partKind, partContent, messageIndex)
+		}
+		return units
+	default:
+		return appendValueUnit(units, path, role, "metadata", value, messageIndex)
+	}
+}
+
+func appendTextUnit(units []PromptUnit, path, role, kind, content string, messageIndex int) []PromptUnit {
+	return appendValueUnit(units, path, role, kind, content, messageIndex)
+}
+
+func appendValueUnit(units []PromptUnit, path, role, kind string, value any, messageIndex int) []PromptUnit {
+	content := contentText(value)
+	estimatedTokens := estimateTokens(promptText(value))
+	structuredKind := kind == "tool_schema" || kind == "state" || kind == "questions"
+	if structuredKind {
+		if text, isString := value.(string); isString && kind != "tool_schema" {
+			content = sanitizeString(text)
+			estimatedTokens = estimateTokens(promptText(text))
+		} else {
+			estimateSource := value
+			if kind != "tool_schema" {
+				estimateSource = stripMediaForTokenEstimate(value)
+			}
+			data, err := common.Marshal(estimateSource)
+			if err != nil {
+				return units
+			}
+			estimatedTokens = estimateTokens(string(data))
+			if sanitized, err := common.Marshal(sanitizeValue(value, "")); err == nil {
+				content = sanitizeString(string(sanitized))
+			}
+		}
+	}
+	if strings.TrimSpace(content) == "" {
+		return units
+	}
+	return append(units, PromptUnit{
+		Index:           len(units),
+		MessageIndex:    messageIndex,
+		Path:            path,
+		Role:            role,
+		Kind:            kind,
+		Content:         content,
+		ContentPreview:  truncatePreview(content, 240),
+		EstimatedTokens: estimatedTokens,
+		TokenSource:     "local_estimate",
+		CacheSource:     "cache_boundary_inference",
+		Confidence:      "estimated",
+	})
+}
+
+func finalizePromptUnits(units []PromptUnit) []PromptUnit {
+	total := 0
+	for index := range units {
+		units[index].Index = index
+		units[index].CumulativeStart = total
+		total += units[index].EstimatedTokens
+		units[index].CumulativeEnd = total
+		if units[index].CacheStatus == "" {
+			units[index].CacheStatus = "unknown"
+		}
+	}
+	return units
+}
+
+func applyCacheBoundary(prompt *PromptDebug, cachedTokens, promptTokens int) {
+	if cachedTokens < 0 {
+		cachedTokens = 0
+	}
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
+	cacheHitRate := float64(cachedTokens) / float64(max(promptTokens, 1))
+	cacheHitRate = min(max(cacheHitRate, 0), 1)
+	estimatedCachedTokens := cachedTokens
+	if prompt.TotalEstimatedTokens > 0 && promptTokens > 0 {
+		estimatedCachedTokens = int(math.Round(cacheHitRate * float64(prompt.TotalEstimatedTokens)))
+	}
+	estimatedCachedTokens = min(max(estimatedCachedTokens, 0), prompt.TotalEstimatedTokens)
+	breakIndex := -1
+	breakPath := ""
+	breakRole := ""
+	breakOffset := 0
+	units := prompt.Units
+	for index := range units {
+		unit := &units[index]
+		overlap := min(max(estimatedCachedTokens-unit.CumulativeStart, 0), unit.EstimatedTokens)
+		unit.CacheOverlapTokens = overlap
+		unit.CacheSource = "cache_boundary_inference"
+		if unit.EstimatedTokens == 0 {
+			if unit.CumulativeStart < estimatedCachedTokens ||
+				(estimatedCachedTokens > 0 && estimatedCachedTokens >= prompt.TotalEstimatedTokens) {
+				unit.CacheStatus = "hit"
+			} else {
+				unit.CacheStatus = "miss"
+			}
+		} else if overlap <= 0 {
+			unit.CacheStatus = "miss"
+		} else if overlap >= unit.EstimatedTokens {
+			unit.CacheStatus = "hit"
+		} else {
+			unit.CacheStatus = "partial"
+		}
+		unit.Confidence = "inferred"
+		if breakIndex == -1 && unit.EstimatedTokens > 0 && unit.CumulativeEnd > estimatedCachedTokens {
+			breakIndex = unit.Index
+			breakPath = unit.Path
+			breakRole = unit.Role
+			breakOffset = max(estimatedCachedTokens-unit.CumulativeStart, 0)
+		}
+	}
+	prompt.Units = units
+	if breakIndex == -1 && len(units) > 0 {
+		last := units[len(units)-1]
+		breakIndex = last.Index
+		breakPath = last.Path
+		breakRole = last.Role
+		breakOffset = last.EstimatedTokens
+	}
+	prompt.CacheBoundary = &CacheBoundary{
+		CachedTokens:          cachedTokens,
+		PromptTokens:          promptTokens,
+		CacheHitRate:          cacheHitRate,
+		EstimatedCachedTokens: estimatedCachedTokens,
+		BreakUnitIndex:        breakIndex,
+		BreakUnitPath:         breakPath,
+		BreakUnitRole:         breakRole,
+		BreakOffsetTokens:     breakOffset,
+		Source:                "cache_boundary_inference",
+		Confidence:            "inferred",
+	}
+}
+
+func newPromptMessage(role string, content any, cached bool, index int) PromptMessage {
+	return PromptMessage{
+		Role:            role,
+		Content:         contentText(content),
+		EstimatedTokens: estimateTokens(promptText(content)),
+		Cached:          cached,
+		Index:           index,
+	}
+}
+
+func containsCacheMarker(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			lower := strings.ToLower(key)
+			if lower == "cache_control" || lower == "cached" || lower == "prompt_cache_key" {
+				return true
+			}
+			if containsCacheMarker(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if containsCacheMarker(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Prompt sizes are calculated before long text is summarized for the log.
+func promptText(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		if strings.HasPrefix(strings.ToLower(typed), "data:") || (len(typed) >= 1024 && looksLikeBase64(typed)) {
+			return sanitizeString(typed)
+		}
+		return typed
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, child := range typed {
+			if text := promptText(child); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		for _, key := range []string{"text", "content", "input_text", "output_text", "parts"} {
+			if text := promptText(typed[key]); text != "" {
+				return text
+			}
+		}
+		if mediaType := stringValue(typed["type"]); mediaType != "" {
+			return fmt.Sprintf("[%s omitted]", mediaType)
+		}
+		data, err := common.Marshal(sanitizeValue(typed, ""))
+		if err == nil {
+			return string(data)
+		}
+	default:
+		return fmt.Sprint(value)
+	}
+	return ""
+}
+
+func contentText(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return sanitizeString(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, child := range typed {
+			if text := contentText(child); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		for _, key := range []string{"text", "content", "input_text", "output_text", "parts"} {
+			if text := contentText(typed[key]); text != "" {
+				return text
+			}
+		}
+		if mediaType := stringValue(typed["type"]); mediaType != "" {
+			return fmt.Sprintf("[%s omitted]", mediaType)
+		}
+		data, err := common.Marshal(sanitizeValue(typed, ""))
+		if err == nil {
+			return string(data)
+		}
+	default:
+		return fmt.Sprint(value)
+	}
+	return ""
+}
+
+func extractResponsesOutput(outputs []any) string {
+	var builder strings.Builder
+	for _, outputValue := range outputs {
+		output, ok := outputValue.(map[string]any)
+		if !ok {
+			continue
+		}
+		builder.WriteString(contentText(output["content"]))
+	}
+	return builder.String()
+}
+
+func responseFinishReason(root map[string]any) string {
+	if details, ok := root["incomplete_details"].(map[string]any); ok {
+		if reason := stringValue(details["reason"]); reason != "" {
+			return reason
+		}
+		if reason := stringValue(details["reasoning"]); reason != "" {
+			return reason
+		}
+	}
+	status := stringValue(root["status"])
+	if status == "completed" {
+		return "stop"
+	}
+	return status
+}
+
+func estimateTokens(text string) int {
+	if text == "" {
+		return 0
+	}
+	return int(math.Ceil(float64(utf8.RuneCountInString(text)) / 4))
+}
+
+func truncatePreview(text string, maxRunes int) string {
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return string(runes[:maxRunes]) + "..."
+}
+
+func stringValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return fmt.Sprint(value)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func stripMediaForTokenEstimate(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(typed))
+		for key, child := range typed {
+			result[key] = stripMediaForTokenEstimate(child)
+		}
+		return result
+	case []any:
+		result := make([]any, len(typed))
+		for i := range typed {
+			result[i] = stripMediaForTokenEstimate(typed[i])
+		}
+		return result
+	case string:
+		if strings.HasPrefix(strings.ToLower(typed), "data:") || (len(typed) >= 1024 && looksLikeBase64(typed)) {
+			return sanitizeString(typed)
+		}
+		return typed
+	default:
+		return value
+	}
+}

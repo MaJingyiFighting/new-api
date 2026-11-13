@@ -92,6 +92,7 @@ import {
   isTimingLogType,
 } from '../../lib/utils'
 import { USAGE_BILLING_PATH, type LogOtherData } from '../../types'
+import { GenerationDebugSection } from '../generation-debug/generation-debug-section'
 import { ResponseModelDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
 import {
@@ -369,7 +370,12 @@ function BillingBreakdown(props: {
   return (
     <DetailSection label={t('Billing Details')}>
       {rows.map((row) => (
-        <DetailRow key={row.label} label={row.label} value={row.value} mono />
+        <DetailRow
+          key={String(row.label)}
+          label={row.label}
+          value={row.value}
+          mono
+        />
       ))}
       {usageFacts.length > 0 && (
         <>
@@ -485,7 +491,12 @@ function TokenBreakdown(props: { log: UsageLog; other: LogOtherData }) {
   return (
     <DetailSection label={t('Token Breakdown')}>
       {rows.map((row) => (
-        <DetailRow key={row.label} label={row.label} value={row.value} mono />
+        <DetailRow
+          key={String(row.label)}
+          label={row.label}
+          value={row.value}
+          mono
+        />
       ))}
       {other.billing_tokens && (
         <div
@@ -526,6 +537,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const { t } = useTranslation()
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
   const other = parseLogOther(props.log.other)
+  const hasGenerationDebug = !!other?.generation_debug
   const typeConfig = getLogTypeConfig(props.log.type)
 
   const isViolation = isViolationFeeLog(other)
@@ -534,18 +546,24 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const isTopup = props.log.type === 1
   const isManage = props.log.type === 3
   const isSubscription = other?.billing_source === 'subscription'
-  const isTieredBilling =
-    isConsume &&
-    !isViolation &&
-    other?.billing_mode === 'tiered_expr' &&
-    !!other?.expr_b64
-  const pricingData = usePricingData(props.open && isTieredBilling)
+	const isTieredBilling =
+	  isConsume &&
+	  !isViolation &&
+	  other?.billing_mode === 'tiered_expr' &&
+	  !!other?.expr_b64
+	let dialogWidthClass = 'sm:max-w-lg'
+	if (hasGenerationDebug) {
+		dialogWidthClass = 'sm:max-w-[min(96vw,1280px)] lg:max-w-[min(96vw,1440px)]'
+	} else if (isTieredBilling) {
+		dialogWidthClass = 'sm:max-w-4xl lg:max-w-5xl'
+	}
+	const pricingData = usePricingData(props.open && isTieredBilling)
   const billingUsageSchema = pluginUsageSchema(
     pricingData.models.find(
       (model) => model.model_name === props.log.model_name
     ),
     other?.admin_info?.task_plugin?.key
-  )
+	  )
   const hasAudioTokens = other?.ws || other?.audio
   const showTiming = isTimingLogType(props.log.type)
   const showAdminIp =
@@ -602,8 +620,10 @@ export function DetailsDialog(props: DetailsDialogProps) {
     if (adminInfo.auth_method === 'session') return t('Session')
     return String(adminInfo.auth_method)
   })()
+	// Localized operation text rendered from the language-independent op
+	// descriptor (shared by audit type=3 and login type=7).
 
-  // Top-up, audit, and login logs share the language-independent descriptor.
+	// Top-up, audit, and login logs share the language-independent descriptor.
   const quotaOperation = isTopup
     ? buildQuotaAuditOperation(
         other?.op?.action ?? '',
@@ -611,7 +631,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
         true,
         t
       )
-    : null
+	    : null
   const operationText = renderAuditContent(other, t)
   const details =
     (isTopup ? operationText : null) ??
@@ -691,15 +711,22 @@ export function DetailsDialog(props: DetailsDialogProps) {
       contentClassName={cn(
         'min-w-0 overflow-hidden',
         'max-sm:max-h-(--dialog-available-height) max-sm:w-[calc(100vw-1.5rem)] max-sm:max-w-[calc(100vw-1.5rem)] max-sm:p-4',
-        isTieredBilling ? 'sm:max-w-4xl lg:max-w-5xl' : 'sm:max-w-lg'
+        dialogWidthClass
       )}
       headerClassName='max-sm:gap-1'
       titleClassName='flex items-center gap-2 text-base'
       descriptionClassName='sr-only'
-      contentHeight='min(72dvh, 720px)'
-      bodyClassName='pr-2 sm:pr-4'
+      contentHeight={
+        hasGenerationDebug ? 'min(88dvh, 920px)' : 'min(72dvh, 720px)'
+      }
+      bodyClassName={hasGenerationDebug ? 'pr-0' : 'pr-2 sm:pr-4'}
     >
-      <div className='w-full max-w-full min-w-0 space-y-2.5 overflow-x-hidden py-1 sm:space-y-3'>
+      <div
+        className={cn(
+          'w-full max-w-full min-w-0 space-y-2.5 py-1 sm:space-y-3',
+          !hasGenerationDebug && 'overflow-x-hidden'
+        )}
+      >
         {/* Overview section - key identifiers */}
         <div className='min-w-0 space-y-1'>
           {props.log.request_id && (
@@ -1019,7 +1046,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
           >
             {topupAuditFields.map((field) => (
               <DetailRow
-                key={field.label}
+                key={String(field.label)}
                 label={field.label}
                 value={field.value}
                 mono
@@ -1116,7 +1143,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
             )}
             {loginAuditFields.map((field) => (
               <DetailRow
-                key={field.label}
+                key={String(field.label)}
                 label={field.label}
                 value={field.value}
                 mono
@@ -1215,6 +1242,12 @@ export function DetailsDialog(props: DetailsDialogProps) {
               />
             </DetailSection>
           )}
+
+        <GenerationDebugSection
+          log={props.log}
+          other={other}
+          isAdmin={props.isAdmin}
+        />
 
         {/* Token breakdown (for consume/error types with token data) */}
         {isDisplayableType(props.log.type) && other && (
