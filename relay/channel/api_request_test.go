@@ -2,9 +2,13 @@ package channel
 
 import (
 	"context"
+	"github.com/QuantumNous/new-api/service"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
@@ -215,5 +219,71 @@ func TestToWebSocketURL(t *testing.T) {
 		"ws://127.0.0.1:3000/backend-api/codex/responses": "ws://127.0.0.1:3000/backend-api/codex/responses",
 	} {
 		assert.Equal(t, want, toWebSocketURL(input), input)
+	}
+}
+
+type cancellationAdaptor struct {
+	Adaptor
+	url string
+}
+
+func (a cancellationAdaptor) GetRequestURL(_ *relaycommon.RelayInfo) (string, error) {
+	return a.url, nil
+}
+func (a cancellationAdaptor) SetupRequestHeader(_ *gin.Context, _ *http.Header, _ *relaycommon.RelayInfo) error {
+	return nil
+}
+
+func TestModelRequestCancellationReachesUpstreamBeforeHeaders(t *testing.T) {
+	service.InitHttpClient()
+	gin.SetMode(gin.TestMode)
+	for _, send := range []struct {
+		name string
+		call func(Adaptor, *gin.Context, *relaycommon.RelayInfo, io.Reader) (*http.Response, error)
+	}{{"json", DoApiRequest}, {"form", DoFormRequest}} {
+		t.Run(send.name, func(t *testing.T) {
+			started := make(chan struct{})
+			cancelled := make(chan struct{})
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, err := io.Copy(io.Discard, r.Body)
+				if err != nil {
+					return
+				}
+				close(started)
+				<-r.Context().Done()
+				close(cancelled)
+			}))
+			defer upstream.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}")).WithContext(ctx)
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+			finished := make(chan error, 1)
+			go func() {
+				resp, err := send.call(cancellationAdaptor{url: upstream.URL}, c, info, strings.NewReader("{}"))
+				if resp != nil {
+					resp.Body.Close()
+				}
+				finished <- err
+			}()
+			select {
+			case <-started:
+			case <-time.After(3 * time.Second):
+				t.Fatal("upstream did not start")
+			}
+			cancel()
+			select {
+			case <-cancelled:
+			case <-time.After(time.Second):
+				t.Fatal("upstream did not receive cancellation")
+			}
+			select {
+			case err := <-finished:
+				require.ErrorIs(t, err, context.Canceled)
+			case <-time.After(time.Second):
+				t.Fatal("relay did not return")
+			}
+		})
 	}
 }
