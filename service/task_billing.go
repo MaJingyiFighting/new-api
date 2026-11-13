@@ -7,12 +7,14 @@ import (
 	"maps"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/generationdebug"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -50,7 +52,8 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 	other := model.NewLogOther()
 	other.SetPublic("is_task", true)
 	other.SetPublic("request_path", c.Request.URL.Path)
-	if taskDeliveredInline(c, task) {
+	inline := taskDeliveredInline(c, task)
+	if inline {
 		other.SetPublic("task_sync", true)
 	}
 	other.SetPublic("model_price", info.PriceData.ModelPrice)
@@ -77,20 +80,92 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 		setTaskImageCount(other, info.PriceData.OtherRatios()["image_count"])
 	}
 	appendTaskLogInfo(task, other)
+	AppendResponseModelLogInfo(info, other)
 	attachQuotaSaturation(c, info, other)
 	if len(info.RequestPluginSteps) > 0 {
 		other.SetAdmin("request_plugins", info.RequestPluginSteps)
 	}
 	appendRequestPluginRecord(info, other)
+
+	var taskUsage *dto.Usage
+	parseFactTokens := func(facts map[string]any, keys ...string) (int, bool) {
+		for _, key := range keys {
+			raw, exists := facts[key]
+			if !exists {
+				continue
+			}
+			switch n := raw.(type) {
+			case float64:
+				if !math.IsNaN(n) && !math.IsInf(n, 0) && n >= 0 {
+					return common.QuotaFromFloat(n), true
+				}
+			case int:
+				if n >= 0 {
+					return common.QuotaFromFloat(float64(n)), true
+				}
+			case int64:
+				if n >= 0 {
+					return common.QuotaFromFloat(float64(n)), true
+				}
+			}
+		}
+		return 0, false
+	}
+	if snap := info.TieredBillingSnapshot; snap != nil && len(snap.UsageFacts) > 0 {
+		promptTokens, hasPrompt := parseFactTokens(snap.UsageFacts, "input_tokens", "prompt_tokens")
+		completionTokens, hasCompletion := parseFactTokens(snap.UsageFacts, "output_tokens", "completion_tokens")
+		if hasPrompt || hasCompletion {
+			taskUsage = &dto.Usage{
+				PromptTokens:     promptTokens,
+				CompletionTokens: completionTokens,
+				TotalTokens:      promptTokens + completionTokens,
+			}
+		}
+	}
+	if taskUsage == nil && inline && task != nil && len(task.Data) > 0 && task.Data[0] == '{' {
+		var payload struct {
+			Usage map[string]any `json:"usage"`
+		}
+		if common.Unmarshal(task.Data, &payload) == nil && len(payload.Usage) > 0 {
+			promptTokens, hasPrompt := parseFactTokens(payload.Usage, "input_tokens", "prompt_tokens")
+			completionTokens, hasCompletion := parseFactTokens(payload.Usage, "output_tokens", "completion_tokens")
+			if hasPrompt || hasCompletion {
+				taskUsage = &dto.Usage{
+					PromptTokens:     promptTokens,
+					CompletionTokens: completionTokens,
+					TotalTokens:      promptTokens + completionTokens,
+				}
+			}
+		}
+	}
+	mergeGenerationDebugIntoLogOther(c, other, taskUsage, generationdebug.LogMeta{
+		RequestID:         info.RequestId,
+		UpstreamRequestID: c.GetString(common.UpstreamRequestIdKey),
+		Streaming:         info.IsStream,
+		Quota:             info.PriceData.Quota,
+		QuotaPerUnit:      common.QuotaPerUnit,
+	})
+	var promptTokens, completionTokens, useTimeSeconds int
+	if taskUsage != nil {
+		promptTokens = taskUsage.PromptTokens
+		completionTokens = taskUsage.CompletionTokens
+	}
+	if inline && !info.StartTime.IsZero() {
+		useTimeSeconds = max(int(time.Since(info.StartTime).Seconds()), 0)
+	}
 	model.RecordConsumeLog(c, info.UserId, model.RecordConsumeLogParams{
-		ChannelId: info.ChannelId,
-		ModelName: info.OriginModelName,
-		TokenName: tokenName,
-		Quota:     info.PriceData.Quota,
-		Content:   logContent,
-		TokenId:   info.TokenId,
-		Group:     info.UsingGroup,
-		Other:     other,
+		ChannelId:        info.ChannelId,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		ModelName:        info.OriginModelName,
+		TokenName:        tokenName,
+		Quota:            info.PriceData.Quota,
+		Content:          logContent,
+		TokenId:          info.TokenId,
+		UseTimeSeconds:   useTimeSeconds,
+		IsStream:         info.IsStream,
+		Group:            info.UsingGroup,
+		Other:            other,
 	})
 	model.UpdateUserUsedQuotaAndRequestCount(info.UserId, info.PriceData.Quota)
 	model.UpdateChannelUsedQuota(info.ChannelId, info.PriceData.Quota)

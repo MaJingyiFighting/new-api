@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	"github.com/QuantumNous/new-api/pkg/generationdebug"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
@@ -260,6 +262,31 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		}
 	}
 
+	if generationdebug.Begin(c, info.RequestId, false) {
+		var inbound any
+		if rawText, exists := c.Get(jsplugin.ContextKeyRequestBodyText); exists {
+			if rawJSON, ok := rawText.(json.RawMessage); ok && len(rawJSON) > 0 {
+				inbound = rawJSON
+			}
+		}
+		if inbound == nil {
+			if taskReq, exists := c.Get("task_request"); exists {
+				inbound = taskReq
+			}
+		}
+		if c.Request != nil && strings.Contains(strings.ToLower(c.GetHeader("Content-Type")), "multipart/form-data") {
+			if inbound != nil {
+				if inboundData, marshalErr := common.Marshal(inbound); marshalErr == nil {
+					generationdebug.CaptureInboundRequest(c, json.RawMessage(inboundData), bytes.NewReader(inboundData))
+				}
+			}
+		} else if storage, captureErr := common.GetBodyStorage(c); captureErr == nil {
+			generationdebug.CaptureInboundRequest(c, inbound, storage)
+		} else if inbound != nil {
+			generationdebug.CaptureInboundRequest(c, inbound, nil)
+		}
+	}
+
 	// 4. 价格计算：基础模型价格。重试可能换了插件或渠道，每次尝试都重新定价，
 	//    不沿用上一次尝试的表达式快照。
 	info.OriginModelName = modelName
@@ -377,8 +404,18 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	if apiErr != nil {
 		return nil, requestplugin.TaskError(apiErr)
 	}
+	if c.Request != nil && strings.Contains(strings.ToLower(c.GetHeader("Content-Type")), "multipart/form-data") {
+		if taskReq, exists := c.Get("task_request"); exists && taskReq != nil {
+			if upstreamData, marshalErr := common.Marshal(taskReq); marshalErr == nil {
+				generationdebug.CaptureUpstreamRequest(c, upstreamData)
+			}
+		}
+	} else if seeker, ok := requestBody.(io.ReadSeeker); ok {
+		generationdebug.CaptureUpstreamReader(c, seeker)
+	}
 
 	// 9. 发送请求
+	generationdebug.MarkUpstreamStart(c)
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return nil, service.TaskErrorWrapper(err, "do_request_failed", http.StatusInternalServerError, common.UpstreamAddresses(c)...)
@@ -387,21 +424,32 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		return nil, service.TaskErrorWrapperLocal(errors.New("upstream returned an empty response"), "fail_to_fetch_task", http.StatusBadGateway)
 	}
 	defer resp.Body.Close()
+	resp.Body = generationdebug.WrapResponseBody(c, resp.Body, strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream"))
 	// Any 2xx is a successful submission: task APIs commonly answer 201 Created
 	// or 202 Accepted, and parseSubmitResponse receives the exact status code.
 	if resp.StatusCode/100 != 2 {
 		responseBody, _ := io.ReadAll(resp.Body)
+		generationdebug.MarkResponseComplete(c)
 		return nil, service.TaskErrorWrapper(fmt.Errorf("%s", string(responseBody)), "fail_to_fetch_task", resp.StatusCode, common.UpstreamAddresses(c)...)
 	}
 
 	// 10. Parse only. The controller presents the response after the durable
 	// task barrier and billing settlement.
 	parsed, taskErr := adaptor.ParseResponse(c, resp, info)
+	generationdebug.MarkResponseComplete(c)
 	if taskErr != nil {
 		return nil, taskErr
 	}
 	if parsed == nil {
 		return nil, service.TaskErrorWrapperLocal(errors.New("task adaptor returned an empty response"), "plugin_submit_response_invalid", http.StatusBadGateway)
+	}
+	if len(parsed.TaskData) > 0 && parsed.TaskData[0] == '{' {
+		var responseMeta struct {
+			Model string `json:"model"`
+		}
+		if common.Unmarshal(parsed.TaskData, &responseMeta) == nil && responseMeta.Model != "" {
+			info.ObserveResponseModel(responseMeta.Model)
+		}
 	}
 
 	// 11. 提交后计费调整：让适配器根据上游实际返回调整 OtherRatios

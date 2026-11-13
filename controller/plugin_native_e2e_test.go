@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,11 +19,13 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/generationdebug"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/setting/request_plugin_setting"
@@ -650,4 +653,208 @@ export function ingress(ctx, req) {
 	require.Nil(t, taskErr)
 	assert.Equal(t, "task: mail [email] a lighthouse", gjson.Get(sent, "prompt").Str, sent)
 	assert.Equal(t, "kling-v3", gjson.Get(sent, "model_name").Str)
+}
+
+func TestTypeSafeNativePluginRouteRecordsGenerationDebugAndSettlesUsage(t *testing.T) {
+	t.Setenv("GENERATION_DEBUG_ENABLED", "true")
+	t.Setenv("GENERATION_DEBUG_CAPTURE_RAW", "true")
+	t.Setenv("GENERATION_DEBUG_CAPTURE_OUTPUT", "true")
+	t.Setenv("GENERATION_DEBUG_USER_VISIBLE", "true")
+	t.Setenv("GENERATION_DEBUG_SAMPLE_RATE", "1")
+	gin.SetMode(gin.TestMode)
+	service.InitHttpClient()
+	require.NoError(t, i18n.Init())
+
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
+	previousMaster, previousSQLite := common.IsMasterNode, common.SQLitePath
+	previousMemoryCache, previousBatchUpdate, previousLogConsume, previousRedis := common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.RedisEnabled
+	savedBilling := map[string]string{}
+	require.NoError(t, config.GlobalConfig.SaveToDB(func(key, value string) error { savedBilling[key] = value; return nil }))
+	t.Setenv("SQL_DSN", "")
+	t.Setenv("LOG_SQL_DSN", "")
+	common.IsMasterNode, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.RedisEnabled = false, false, false, true, false
+	common.SQLitePath = filepath.Join(t.TempDir(), "typesafe.db")
+	require.NoError(t, model.InitDB())
+	database := model.DB
+	model.LOG_DB = database
+	require.NoError(t, database.AutoMigrate(&model.Option{}, &model.User{}, &model.Token{}, &model.UserSubscription{}, &model.SubscriptionPlan{}, &model.Channel{}, &model.Ability{}, &model.Task{}, &model.Log{}))
+	sqlDB, err := database.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+		common.SetDatabaseTypes(previousMain, previousLog)
+		common.IsMasterNode, common.SQLitePath = previousMaster, previousSQLite
+		common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.RedisEnabled = previousMemoryCache, previousBatchUpdate, previousLogConsume, previousRedis
+		require.NoError(t, config.GlobalConfig.LoadFromDB(savedBilling))
+	})
+
+	const startingQuota = 100_000
+	require.NoError(t, database.Create(&model.User{Id: 9, Username: "typesafe-e2e", AffCode: "ts9", Group: "default", Status: common.UserStatusEnabled, Quota: startingQuota}).Error)
+
+	const upstreamResponse = `{"model":"jev-1.14.0","answers":{"damaged":{"type":"noul","noul":0.97},"topic":{"type":"choice","choice":{"refund":0.92,"replace":0.08}}},"usage":{"input_tokens":1000}}`
+	var receivedBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/v1/systemone", r.URL.Path)
+		assert.Equal(t, "Bearer ts-secret-key", r.Header.Get("Authorization"))
+		body, readErr := io.ReadAll(r.Body)
+		require.NoError(t, readErr)
+		receivedBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, upstreamResponse)
+	}))
+	defer upstream.Close()
+
+	const typeSafeSource = `
+const MAX_INPUT_TOKENS = 65792;
+const MODELS = ["jev-1.14.0", "jev-1.13.0", "jev-latest", "jev-preview"];
+export const meta = {
+  apiVersion: 1,
+  key: "typesafe-e2e",
+  name: "TypeSafe",
+  version: "1.2.0",
+  author: { name: "QuantumNous" },
+  baseUrl: "https://api.typesafe.ai",
+  auth: "api_key",
+  models: MODELS,
+  upstreams: ["vendor", "new_api"],
+  requiredCapabilities: ["json-order@1"],
+  fetchMode: "per_task",
+  routes: [
+    { method: "POST", path: "/v1/systemone", type: "submit", decode: "decodeSystemOne", render: "renderSystemOne", retainResult: false }
+  ],
+  usageSchema: {
+    input_tokens: { type: "number", unit: "token", description: { en: "Input token unit price", zh: "输入 token 单价" } }
+  },
+  usageExamples: [{ label: "Jev", facts: { input_tokens: 1000 } }]
+};
+export function buildSubmitRequest(ctx) {
+  return {
+    url: ctx.baseUrl.replace(/\/+$/, "") + "/v1/systemone",
+    method: "POST",
+    headers: { Authorization: "Bearer " + ctx.apiKey, "Content-Type": "application/json", Accept: "application/json" },
+    body: { model: ctx.upstreamModel || ctx.model, state: ctx.requestBody.state, questions: ctx.requestBody.questions }
+  };
+}
+export function parseSubmitResponse(ctx, response) {
+  return { taskId: ctx.publicTaskId, taskData: response.body, immediate: { status: "SUCCESS", progress: "100%" } };
+}
+export function extractUsage(ctx) {
+  if (ctx.usagePurpose === "billing_ratios") return null;
+  return { input_tokens: MAX_INPUT_TOKENS };
+}
+export function extractUsageOnComplete(ctx, result, body) {
+  return { input_tokens: body.usage.input_tokens };
+}
+export function buildQueryRequest() { throw new Error("unused"); }
+export function parseTaskResult() { return { status: "UNKNOWN" }; }
+export const native = {
+  decodeSystemOne: function(ctx) {
+    const body = ctx.body.value;
+    return { kind: "submit", model: body.model, action: "systemone", requestBody: { model: body.model, state: body.state, questions: body.questions } };
+  },
+  renderSystemOne: function(ctx, task) { return task.data; }
+};`
+	loaded, err := pluginruntime.DefaultRegistry.Register(typeSafeSource, pluginruntime.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pluginruntime.DefaultRegistry.Unregister(loaded.Meta.Key) })
+
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		billing_setting.PluginBillingExprOption: `{"typesafe-e2e::jev-latest":"tier(\"base\", u(\"input_tokens\") * 0.042 / 1000000)"}`,
+	}))
+
+	channelSetting := `{"task_plugin_key":"typesafe-e2e"}`
+	channel := model.Channel{
+		Type: constant.ChannelTypeTaskPlugin, Name: "TypeSafe Jev", Key: "ts-secret-key",
+		BaseURL: &upstream.URL, Setting: &channelSetting, Status: common.ChannelStatusEnabled,
+		Models: "jev-latest", Group: "default",
+	}
+	require.NoError(t, database.Create(&channel).Error)
+	priority := int64(1000)
+	require.NoError(t, database.Create(&model.Ability{
+		Group: "default", Model: "jev-latest", ChannelId: channel.Id, Enabled: true, Priority: &priority, Weight: 1,
+	}).Error)
+
+	const clientBody = `{"model":"jev-latest","state":{"z_first":"keep_order","a_second":"second","type":"support_ticket","api_key":"client-inline-secret"},"questions":{"damaged":{"type":"noul","instructions":"Is the mug broken?"},"topic":{"type":"choice","criteria":{"refund":"Money back","replace":null}}}}`
+	generation := pluginruntime.DefaultRegistry.Generation()
+	binding, found := generation.LookupDeclaredRoute(http.MethodPost, "/v1/systemone")
+	require.True(t, found)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/systemone", strings.NewReader(clientBody))
+	c.Request.Header.Set("Content-Type", "application/json")
+	t.Cleanup(func() { common.CleanupBodyStorage(c) })
+	c.Set(common.RequestIdKey, "req-typesafe-debug-1")
+	c.Set("id", 9)
+	c.Set("username", "typesafe-e2e")
+	c.Set("token_name", "note-gateway")
+	c.Set(pluginruntime.ContextKeyPinnedRoute, pluginruntime.PinnedRoute{
+		Generation: generation, Plugin: binding.Plugin, Route: binding.Route, Candidates: []pluginruntime.RouteBinding{binding},
+	})
+	common.SetContextKey(c, constant.ContextKeyUserId, 9)
+	common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+	common.SetContextKey(c, constant.ContextKeyTokenGroup, "default")
+	common.SetContextKey(c, constant.ContextKeyUserQuota, startingQuota)
+	common.SetContextKey(c, constant.ContextKeyTokenUnlimited, true)
+
+	middleware.PrepareTaskPluginRoute()(c)
+	require.False(t, c.IsAborted(), recorder.Body.String())
+	middleware.Distribute()(c)
+	require.False(t, c.IsAborted(), recorder.Body.String())
+	RelayTask(c)
+
+	assert.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.JSONEq(t, upstreamResponse, recorder.Body.String())
+	assert.Less(t, strings.Index(receivedBody, `"z_first"`), strings.Index(receivedBody, `"a_second"`), "json-order@1 must preserve state member order")
+
+	var savedTask model.Task
+	require.NoError(t, database.First(&savedTask).Error)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusSuccess), savedTask.Status)
+	assert.True(t, savedTask.PrivateData.ResultDiscarded)
+	assert.Empty(t, savedTask.Data)
+	assert.Equal(t, 21, savedTask.Quota)
+
+	var updatedUser model.User
+	require.NoError(t, database.First(&updatedUser, 9).Error)
+	assert.Equal(t, startingQuota-21, updatedUser.Quota)
+
+	var consumeLog model.Log
+	require.NoError(t, database.Where("request_id = ? AND type = ?", "req-typesafe-debug-1", model.LogTypeConsume).First(&consumeLog).Error)
+	assert.Equal(t, 1000, consumeLog.PromptTokens)
+	assert.Equal(t, 0, consumeLog.CompletionTokens)
+	assert.Equal(t, 21, consumeLog.Quota)
+	assert.NotContains(t, consumeLog.Other, "client-inline-secret")
+	assert.NotContains(t, consumeLog.Other, "ts-secret-key")
+	assert.Equal(t, "jev-1.14.0", gjson.Get(consumeLog.Other, "response_model.returned_model").Str)
+	assert.Equal(t, "jev-latest", gjson.Get(consumeLog.Other, "response_model.requested_model").Str)
+
+	var details struct {
+		Summary *generationdebug.Summary `json:"generation_debug"`
+		Admin   struct {
+			Raw *generationdebug.RawDebug `json:"generation_debug_raw"`
+		} `json:"admin_info"`
+	}
+	require.NoError(t, common.UnmarshalJsonStr(consumeLog.Other, &details))
+	require.NotNil(t, details.Summary)
+	assert.Equal(t, 1000, details.Summary.PromptTokens)
+	require.NotNil(t, details.Summary.Prompt)
+	require.NotNil(t, details.Summary.Prompt.TokenAccounting)
+	assert.Equal(t, 1000, details.Summary.Prompt.TokenAccounting.PromptTokens)
+	assert.Equal(t, "provider_usage", details.Summary.Prompt.TokenAccounting.Source)
+	require.Len(t, details.Summary.Prompt.UpstreamUnits, 2)
+	assert.Equal(t, "state", details.Summary.Prompt.UpstreamUnits[0].Path)
+	assert.Contains(t, details.Summary.Prompt.UpstreamUnits[0].Content, `"type":"support_ticket"`)
+	assert.Equal(t, "questions", details.Summary.Prompt.UpstreamUnits[1].Path)
+	assert.Contains(t, details.Summary.Prompt.UpstreamUnits[1].Content, `"Is the mug broken?"`)
+	require.NotNil(t, details.Summary.Completion)
+	assert.Contains(t, details.Summary.Completion.NormalizedOutput, `"noul":0.97`)
+	assert.Contains(t, details.Summary.Completion.NormalizedOutput, `"refund":0.92`)
+	require.NotNil(t, details.Admin.Raw)
+	require.NotNil(t, details.Admin.Raw.InboundRequest)
+	require.NotNil(t, details.Admin.Raw.UpstreamRequest)
+	require.NotNil(t, details.Admin.Raw.RawResponse)
 }
